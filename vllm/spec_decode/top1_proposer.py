@@ -53,13 +53,18 @@ class Top1Proposer(SpeculativeProposer):
         seq_group_metadata_list = execute_model_req.seq_group_metadata_list
 
         # Split speculative- and non-speculative- sequences.
+        print("PROPOSING IS_PROMPT", [sg.is_prompt for sg in seq_group_metadata_list])
+        # PREFILL MUST HAVE THIS AT 0
+        print("BEFORE PROPOSING CHECK SPEC", [sg.num_speculative_tokens for sg in seq_group_metadata_list])
         (
             proposal_lens,
             nonzero_proposal_len_seqs,
             nonzero_proposal_len_indices,
         ) = self._split_by_proposal_len(seq_group_metadata_list, proposal_len)
+        print("PROPOSAL LEN",proposal_lens,nonzero_proposal_len_seqs, nonzero_proposal_len_indices)
 
         if nonzero_proposal_len_seqs:
+            print("SPECULATING")
             # Speculate tokens using the draft worker for the speculative
             # sequences.
             # If sampler_transposed is true, then maybe_sampler_output's
@@ -90,6 +95,7 @@ class Top1Proposer(SpeculativeProposer):
                                               transposed)
         else:
             # If no sequences can be speculated, set sampler output to None.
+            print("OUTPUT NONE FOR PROMPT")
             maybe_sampler_output = None
             transposed = False
 
@@ -103,7 +109,7 @@ class Top1Proposer(SpeculativeProposer):
             nonzero_proposal_len_indices=nonzero_proposal_len_indices,
             sampler_transposed=transposed,
         )
-
+        print("PROPOSALS TOKENS", proposal_tokens)
         proposals = SpeculativeProposals(
             proposal_token_ids=proposal_tokens,
             proposal_probs=proposal_probs,

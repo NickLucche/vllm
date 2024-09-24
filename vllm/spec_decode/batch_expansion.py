@@ -70,12 +70,14 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         proposal_token_ids_list = proposals.proposal_token_ids.tolist()
 
         # Filter the list to ignore -1 proposals.
+        # this is empty (all -1) when proposer encounters all prompts
         proposal_token_ids_list_without_skips = [
             proposals for proposals in proposal_token_ids_list
             if -1 not in proposals
         ]
 
         (spec_indices, non_spec_indices, target_seq_group_metadata_list,
+        # TODO understand how it works from tests
          num_scoring_tokens) = self._expand_batch(
              seq_group_metadata_list=execute_model_req.seq_group_metadata_list,
              proposal_token_ids_list=proposal_token_ids_list_without_skips,
@@ -132,7 +134,11 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         (spec_seqs, spec_indices), (non_spec_seqs, non_spec_indices) = \
             split_batch_by_proposal_len(
                 seq_group_metadata_list, proposal_lens_list)
+        print("SPECULATING ON THESE", spec_seqs)
+        print("NOT SPECULATING ON THESE", non_spec_seqs)
 
+        # NOTE basically you're ignoring the non spec ones!!
+        # you have to get the model to execute those too in same batch!!
         target_seq_group_metadata_list = self._create_scoring_model_input(
             seq_group_metadata_list=spec_seqs,
             proposal_token_ids=proposal_token_ids_list,
@@ -141,7 +147,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             target_seq_ids_iter=self._create_target_seq_id_iterator(
                 seq_ids=get_all_seq_ids(seq_group_metadata_list)),
         )
-
+        print("INPUT TO SCORER", target_seq_group_metadata_list)
         num_scoring_tokens = len(target_seq_group_metadata_list)
         target_seq_group_metadata_list.extend(non_spec_seqs)
 
@@ -297,9 +303,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         This function creates K+1 target SequenceGroupMetadata to take
         advantage of the bonus token.
         """
-        assert not input_seq_group_metadata.is_prompt, (
-            "Speculating on "
-            "prompts not yet supported")
+        # TODO remove
+        # assert not input_seq_group_metadata.is_prompt, (
+        #     "Speculating on "
+        #     "prompts not yet supported")
         assert len(input_seq_group_metadata.seq_data) == 1, (
             "Beam search "
             "not supported in speculative decoding")

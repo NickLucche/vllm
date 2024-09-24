@@ -389,7 +389,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # as inputs.
         broadcast_dict = dict(
             num_lookahead_slots=num_lookahead_slots,
-            no_spec=no_spec,
+            # no_spec=no_spec,
+            no_spec=False,
             disable_all_speculation=disable_all_speculation,
         )
         broadcast_tensor_dict(broadcast_dict, src=self._driver_rank)
@@ -397,13 +398,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         assert execute_model_req.seq_group_metadata_list is not None, (
             "speculative decoding requires non-None seq_group_metadata_list")
 
-        self._maybe_disable_speculative_tokens(
-            disable_all_speculation, execute_model_req.seq_group_metadata_list)
+        # self._maybe_disable_speculative_tokens(
+        #     disable_all_speculation, execute_model_req.seq_group_metadata_list)
 
-        if no_spec:
-            return self._run_no_spec(execute_model_req,
-                                     skip_proposer=disable_all_speculation)
-        return self._run_speculative_decoding_step(execute_model_req,
+        # if no_spec:
+        #     return self._run_no_spec(execute_model_req,
+        #                              skip_proposer=disable_all_speculation)
+        return self._run_speculative_decoding_step_chunked(execute_model_req,
                                                    num_lookahead_slots)
 
     @torch.inference_mode()
@@ -580,6 +581,65 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         execute_model_req.previous_hidden_states = None
 
         with Timer() as scoring_timer:
+            proposal_scores = self.scorer.score_proposals(
+                execute_model_req,
+                proposals,
+            )
+
+        with Timer() as verification_timer:
+            accepted_token_ids, target_logprobs = self._verify_tokens(
+                execute_model_req.seq_group_metadata_list, proposal_scores,
+                proposals, execute_model_req.num_lookahead_slots)
+
+        stage_times = (proposal_timer.elapsed_time_ms / num_lookahead_slots,
+                       scoring_timer.elapsed_time_ms,
+                       verification_timer.elapsed_time_ms)
+
+        return self._create_output_sampler_list(
+            execute_model_req.seq_group_metadata_list,
+            accepted_token_ids,
+            target_logprobs=target_logprobs,
+            k=execute_model_req.num_lookahead_slots,
+            stage_times=stage_times)
+    
+    @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
+    def _run_speculative_decoding_step_chunked(
+            self, execute_model_req: ExecuteModelRequest,
+            num_lookahead_slots: int) -> List[SamplerOutput]:
+        """Execute a single step of speculative decoding.
+
+        This invokes the proposer worker to get k speculative tokens for each
+        sequence, then scores each speculative token using the scoring worker.
+
+        Returns a list of SamplerOutput, each containing a single token per
+        sequence.
+        """
+        assert num_lookahead_slots == execute_model_req.num_lookahead_slots
+        # Make sure prefill requests have spec turned off
+        for sg in execute_model_req.seq_group_metadata_list:
+            if sg.is_prompt:
+                sg.num_speculative_tokens = 0
+
+        # Pass last hidden states from target model to proposer
+        execute_model_req.previous_hidden_states = self.previous_hidden_states
+        self.previous_hidden_states = None
+
+        with Timer() as proposal_timer:
+            # Generate proposals using draft worker.
+            # NOTE PROPOSE ONLY FOR DECODE REQUESTS
+            proposals = self.proposer_worker.get_spec_proposals(
+                execute_model_req, self._seq_with_bonus_token_in_last_step)
+
+        if not self._allow_zero_draft_token_step and proposals.no_proposals:
+            #TODO: Fix it #5814
+            raise RuntimeError("Cannot handle cases where distributed draft "
+                               "workers generate no tokens")
+
+        execute_model_req.previous_hidden_states = None
+
+        with Timer() as scoring_timer:
+            # print("SCORING", execute_model_req) 
+            # SCORE THE DECODE AND RUN NORMALLY ON PREFILLS
             proposal_scores = self.scorer.score_proposals(
                 execute_model_req,
                 proposals,
