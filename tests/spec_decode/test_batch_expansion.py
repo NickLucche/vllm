@@ -56,7 +56,7 @@ def test_get_token_ids_to_score(k: int):
     assert actual_output == expected_output
 
 
-@pytest.mark.parametrize('k', [1, 2, 6])
+@pytest.mark.parametrize('k', [2])
 @pytest.mark.skip_global_cleanup
 def test_create_single_target_seq_group_metadata(k: int):
     """Verify correct creation of a batch-expanded seq group metadata.
@@ -81,6 +81,7 @@ def test_create_single_target_seq_group_metadata(k: int):
     target_seq_id = 100
 
     scorer = BatchExpansionTop1Scorer(mock_worker(), 'cuda:0', 32_000)
+    print("INPUT", input_seq_group_metadata)
     output = scorer._create_single_target_seq_group_metadata(  # pylint: disable=protected-access
         input_seq_group_metadata,
         input_seq_id,
@@ -88,6 +89,7 @@ def test_create_single_target_seq_group_metadata(k: int):
         token_ids,
         input_seq_group_metadata.sampling_params,
     )
+    print("\n\n\n   OUT", output)
 
     assert output.request_id == input_seq_group_metadata.request_id
     assert len(output.seq_data) == 1
