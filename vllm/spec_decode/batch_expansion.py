@@ -76,14 +76,16 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             if -1 not in proposals
         ]
 
+        # NOTE non speculative sequences are still addedd to target_seq! (wut, anyways we just run the mixed batch)
         (spec_indices, non_spec_indices, target_seq_group_metadata_list,
-        # TODO understand how it works from tests
          num_scoring_tokens) = self._expand_batch(
              seq_group_metadata_list=execute_model_req.seq_group_metadata_list,
              proposal_token_ids_list=proposal_token_ids_list_without_skips,
              proposal_lens_list=proposal_lens_list,
          )
 
+        # NOTE were non-scoring sequences alsoadded here in target??
+        print("SCORING with", self._scorer_worker, "ON", target_seq_group_metadata_list)
         target_sampler_output = self._scorer_worker.execute_model(
             execute_model_req=execute_model_req.clone(
                 seq_group_metadata_list=target_seq_group_metadata_list))
@@ -147,9 +149,11 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             target_seq_ids_iter=self._create_target_seq_id_iterator(
                 seq_ids=get_all_seq_ids(seq_group_metadata_list)),
         )
-        print("INPUT TO SCORER", target_seq_group_metadata_list)
         num_scoring_tokens = len(target_seq_group_metadata_list)
-        target_seq_group_metadata_list.extend(non_spec_seqs)
+        # |<-prefill_0->|...|<-prefill_N-1->|<--decode_0-->|...|<--decode_M-1-->|
+        # target_seq_group_metadata_list.extend(non_spec_seqs)
+        non_spec_seqs.extend(target_seq_group_metadata_list)
+        print("INPUT TO SCORER AFTER EXTENDING WITH non_spec_seqs", target_seq_group_metadata_list)
 
         return (spec_indices, non_spec_indices, target_seq_group_metadata_list,
                 num_scoring_tokens)
@@ -314,7 +318,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
         token_ids_to_score = self._get_token_ids_to_score(
             proposal_token_ids[batch_index])
-
+        print("\n\n\nIN seq", input_seq_group_metadata)
         # Use simpler sampling parameters apart from for final token
         # (in particular don't do seeded sampling) since those sampled tokens
         # aren't used.
@@ -338,7 +342,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                     token_ids,
                     sampling_params=target_sampling_params,
                 ))
-
+        print("TARGET SEQ", target_seq_group_metadata_list)
         return target_seq_group_metadata_list
 
     @staticmethod
