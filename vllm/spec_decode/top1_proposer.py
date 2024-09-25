@@ -49,6 +49,7 @@ class Top1Proposer(SpeculativeProposer):
         Sequences which would exceed the max model length are skipped during
         speculation.
         """
+        # global batch k
         proposal_len = execute_model_req.num_lookahead_slots
         seq_group_metadata_list = execute_model_req.seq_group_metadata_list
 
@@ -59,10 +60,17 @@ class Top1Proposer(SpeculativeProposer):
         (
             proposal_lens,
             nonzero_proposal_len_seqs,
+            prefill_seqs,
             nonzero_proposal_len_indices,
         ) = self._split_by_proposal_len(seq_group_metadata_list, proposal_len)
         print("PROPOSAL LEN",proposal_lens,nonzero_proposal_len_seqs, nonzero_proposal_len_indices)
 
+        # for now, run this in a separate forward, it can be optimized to run batched with the first iter of the decodes
+        # execute_model_req.previous_hidden_states = prepare_prefill_hidden_states(sampler_output.prefill_hidden_states)
+        prefill_req = ExecuteModelRequest(prefill_seqs)
+        self._worker.execute_model(prefill_req)
+
+        # run on decode normally
         if nonzero_proposal_len_seqs:
             print("SPECULATING")
             # Speculate tokens using the draft worker for the speculative
@@ -122,7 +130,7 @@ class Top1Proposer(SpeculativeProposer):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         proposal_len: int,
-    ) -> Tuple[List[int], List[SequenceGroupMetadata], List[int]]:
+    ) -> Tuple[List[int], List[SequenceGroupMetadata], List[SequenceGroupMetadata], List[int]]:
         """Split sequences by two groups:
         1. Sequences with non-zero proposal length.
         2. Sequences with zero proposal length (due to disabled speculation
@@ -131,12 +139,14 @@ class Top1Proposer(SpeculativeProposer):
 
         proposal_lens: List[int] = []
         nonzero_proposal_len_seqs: List[SequenceGroupMetadata] = []
+        prefill_seqs: List[SequenceGroupMetadata] = []
         nonzero_proposal_len_indices: List[int] = []
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             # The speculative decoding for this request has been disabled
             # (e.g. due to high traffic).
             if seq_group_metadata.num_speculative_tokens == 0:
                 proposal_lens.append(0)
+                prefill_seqs.append(seq_group_metadata)
                 continue
 
             seq_data = next(iter(seq_group_metadata.seq_data.values()))
@@ -158,6 +168,7 @@ class Top1Proposer(SpeculativeProposer):
         return (
             proposal_lens,
             nonzero_proposal_len_seqs,
+            prefill_seqs,
             nonzero_proposal_len_indices,
         )
 
