@@ -137,6 +137,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             draft_tp = draft_parallel_config.tensor_parallel_size
             target_tp = scorer_worker.parallel_config.tensor_parallel_size
 
+            print("PROPOSAL WORKER TYPE", draft_worker_kwargs["model_config"].hf_config.model_type)
             if draft_worker_kwargs[
                     "model_config"].hf_config.model_type == "mlp_speculator":
                 proposer_worker = MLPSpeculatorWorker(**draft_worker_kwargs)
@@ -154,6 +155,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                             "EAGLE does not support TP > 1 yet")
 
                     allow_zero_draft_token_step = False
+                # TODO THE DEFAULT PROPOSER WE RUN, SHOULD TEST OTHER!
                 proposer_worker = MultiStepWorker(**draft_worker_kwargs)
 
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
@@ -376,6 +378,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         #    none of the requests in the batch have spec decoding enabled.
         # In any of these cases, the proposer and scorer workers
         # are called normally.
+        # no_spec = all([sg.is_prompt for sg in execute_model_req.seq_group_metadata_list])
         no_spec = num_lookahead_slots == 0 or disable_all_speculation or all(
             sgm.num_speculative_tokens == 0
             for sgm in execute_model_req.seq_group_metadata_list)
@@ -491,6 +494,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
 
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
+        print("SAMPLER OUTPUT NO SPEC", sampler_output)
         assert len(sampler_output) == 1
         sampler_output = sampler_output[0]
 
@@ -600,6 +604,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 proposals,
             )
 
+        print("VERIFYIING")
         with Timer() as verification_timer:
             # TODO usual verify just make sure prefills are ignored 
             accepted_token_ids, target_logprobs = self._verify_tokens(

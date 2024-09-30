@@ -63,16 +63,26 @@ class Top1Proposer(SpeculativeProposer):
             prefill_seqs,
             nonzero_proposal_len_indices,
         ) = self._split_by_proposal_len(seq_group_metadata_list, proposal_len)
-        print("PROPOSAL LEN",proposal_lens,nonzero_proposal_len_seqs, nonzero_proposal_len_indices)
+        print("PROPOSAL LEN", proposal_lens, nonzero_proposal_len_seqs, nonzero_proposal_len_indices)
 
-        # for now, run this in a separate forward, it can be optimized to run batched with the first iter of the decodes
-        # execute_model_req.previous_hidden_states = prepare_prefill_hidden_states(sampler_output.prefill_hidden_states)
-        prefill_req = ExecuteModelRequest(prefill_seqs)
-        self._worker.execute_model(prefill_req)
+        # NOTE first change, run prefill!
+        if len(prefill_seqs):
+            print("\n\nRUNNING PROPOSAL PREFILL TO SYNC KV CACHE ON", prefill_seqs)
+            # for now, run this in a separate forward, it can be optimized to run batched with the first iter of the decodes
+            # execute_model_req.previous_hidden_states = prepare_prefill_hidden_states(sampler_output.prefill_hidden_states)
+            prefill_req = execute_model_req.clone(prefill_seqs)
+            print("PREFILL PROPOSAL REQUEST", prefill_req)
+            # prefill_req = ExecuteModelRequest(prefill_seqs)
+            self._worker.execute_model(prefill_req)
+            # _ = self._worker.sampler_output(
+            #     execute_model_req=prefill_req,
+            #     sample_len=1,
+            #     seq_ids_with_bonus_token_in_last_step=set(),
+            # )
 
         # run on decode normally
         if nonzero_proposal_len_seqs:
-            print("SPECULATING")
+            print("PROPOSING ON", len(nonzero_proposal_len_seqs), 'sequences')
             # Speculate tokens using the draft worker for the speculative
             # sequences.
             # If sampler_transposed is true, then maybe_sampler_output's
@@ -103,7 +113,7 @@ class Top1Proposer(SpeculativeProposer):
                                               transposed)
         else:
             # If no sequences can be speculated, set sampler output to None.
-            print("OUTPUT NONE FOR PROMPT")
+            print("OUTPUT NONE FOR PROMPT CANT PROPOSE SHIT")
             maybe_sampler_output = None
             transposed = False
 

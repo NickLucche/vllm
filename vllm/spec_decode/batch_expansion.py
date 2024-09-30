@@ -139,8 +139,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         print("SPECULATING ON THESE", spec_seqs)
         print("NOT SPECULATING ON THESE", non_spec_seqs)
 
-        # NOTE basically you're ignoring the non spec ones!!
-        # you have to get the model to execute those too in same batch!!
         target_seq_group_metadata_list = self._create_scoring_model_input(
             seq_group_metadata_list=spec_seqs,
             proposal_token_ids=proposal_token_ids_list,
@@ -150,10 +148,16 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 seq_ids=get_all_seq_ids(seq_group_metadata_list)),
         )
         num_scoring_tokens = len(target_seq_group_metadata_list)
-        # |<-prefill_0->|...|<-prefill_N-1->|<--decode_0-->|...|<--decode_M-1-->|
+        # |<-prefill_0->|...|<-prefill_N-1->|<--decode_0-->|...|<--decode_M-1-->| 
         # target_seq_group_metadata_list.extend(non_spec_seqs)
         non_spec_seqs.extend(target_seq_group_metadata_list)
+        target_seq_group_metadata_list = non_spec_seqs
+        # so order is flipped and indices need to be adjusted
         print("INPUT TO SCORER AFTER EXTENDING WITH non_spec_seqs", target_seq_group_metadata_list)
+        # TODO fix indices in split_batch_by_proposal_len
+        # we will re-order sampler output based on this indices; intra-group order is maintained, meaning now indices are just packed
+        non_spec_indices, spec_indices = list(range(len(non_spec_indices))), list(range(len(non_spec_indices), len(non_spec_indices) + len(spec_indices)))
+        print("INDICES COMPUTED: SPEC", spec_indices, "NO SPEC", non_spec_indices)
 
         return (spec_indices, non_spec_indices, target_seq_group_metadata_list,
                 num_scoring_tokens)
@@ -318,7 +322,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
         token_ids_to_score = self._get_token_ids_to_score(
             proposal_token_ids[batch_index])
-        print("\n\n\nIN seq", input_seq_group_metadata)
+        # print("\n\n\nIN seq", input_seq_group_metadata)
         # Use simpler sampling parameters apart from for final token
         # (in particular don't do seeded sampling) since those sampled tokens
         # aren't used.
@@ -342,7 +346,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                     token_ids,
                     sampling_params=target_sampling_params,
                 ))
-        print("TARGET SEQ", target_seq_group_metadata_list)
+        # print("TARGET SEQ", target_seq_group_metadata_list)
         return target_seq_group_metadata_list
 
     @staticmethod
