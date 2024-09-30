@@ -24,13 +24,14 @@ PROMPTS = [
 
 @pytest.fixture
 def test_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
-                       test_llm_kwargs, seed):
+                       test_llm_kwargs, seed, enable_chunked_prefill):
 
     def generate():
         kwargs = {
             **common_llm_kwargs,
             **per_test_common_llm_kwargs,
             **test_llm_kwargs,
+            "enable_chunked_prefill": enable_chunked_prefill
         }
 
         llm = LLM(**kwargs)
