@@ -399,7 +399,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         broadcast_dict = dict(
             num_lookahead_slots=num_lookahead_slots,
             no_spec=no_spec,
-            # no_spec=False,
             disable_all_speculation=disable_all_speculation,
         )
         broadcast_tensor_dict(broadcast_dict, src=self._driver_rank)
@@ -414,8 +413,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             print("RUN no spec")
             return self._run_no_spec(execute_model_req,
                                      skip_proposer=disable_all_speculation)
-        # return self._run_speculative_decoding_step(execute_model_req,
-        #                                            num_lookahead_slots)
         print("SPECULATING")
         return self._run_speculative_decoding_step(execute_model_req, num_lookahead_slots)
 
