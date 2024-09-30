@@ -82,7 +82,7 @@ class Top1Proposer(SpeculativeProposer):
 
         # run on decode normally
         if nonzero_proposal_len_seqs:
-            print("PROPOSING ON", len(nonzero_proposal_len_seqs), 'sequences')
+            print("PROPOSING ON", len(nonzero_proposal_len_seqs), 'sequences', "with", self._worker)
             # Speculate tokens using the draft worker for the speculative
             # sequences.
             # If sampler_transposed is true, then maybe_sampler_output's

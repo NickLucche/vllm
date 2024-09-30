@@ -84,8 +84,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
              proposal_lens_list=proposal_lens_list,
          )
 
-        # NOTE were non-scoring sequences alsoadded here in target??
-        print("SCORING with", self._scorer_worker, "ON", target_seq_group_metadata_list)
+        # NOTE were non-scoring sequences alsoadded here in target?? yes!
+        # print("SCORING with", self._scorer_worker, "ON", target_seq_group_metadata_list)
         target_sampler_output = self._scorer_worker.execute_model(
             execute_model_req=execute_model_req.clone(
                 seq_group_metadata_list=target_seq_group_metadata_list))
@@ -93,12 +93,14 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         target_sampler_output = target_sampler_output[0]
 
         if not non_spec_indices:
+            print("ALL SPEC DECODING ENABLEEED")
             # All sequence groups in batch have spec decoding enabled
             contracted = self._contract_batch_all_spec(
                 target_sampler_output=target_sampler_output,
                 proposals=proposals,
             )
         else:
+            print("MIXED BATCH COMING THROUUGH")
             # Batch has a mix of spec decode enabled and disabled seq groups
             contracted = self._contract_batch(
                 contracted_bs=len(execute_model_req.seq_group_metadata_list),
@@ -149,15 +151,19 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         )
         num_scoring_tokens = len(target_seq_group_metadata_list)
         # |<-prefill_0->|...|<-prefill_N-1->|<--decode_0-->|...|<--decode_M-1-->| 
-        # target_seq_group_metadata_list.extend(non_spec_seqs)
-        non_spec_seqs.extend(target_seq_group_metadata_list)
-        target_seq_group_metadata_list = non_spec_seqs
+        # maybe this does NOT matter and order is enforced later
+        target_seq_group_metadata_list.extend(non_spec_seqs)
+
+        # non_spec_seqs.extend(target_seq_group_metadata_list)
+        # target_seq_group_metadata_list = non_spec_seqs
+
         # so order is flipped and indices need to be adjusted
-        print("INPUT TO SCORER AFTER EXTENDING WITH non_spec_seqs", target_seq_group_metadata_list)
+        # print("INPUT TO SCORER AFTER EXTENDING WITH non_spec_seqs", target_seq_group_metadata_list)
         # TODO fix indices in split_batch_by_proposal_len
         # we will re-order sampler output based on this indices; intra-group order is maintained, meaning now indices are just packed
-        non_spec_indices, spec_indices = list(range(len(non_spec_indices))), list(range(len(non_spec_indices), len(non_spec_indices) + len(spec_indices)))
-        print("INDICES COMPUTED: SPEC", spec_indices, "NO SPEC", non_spec_indices)
+        print("INDICES COMPUTED BEFORE: SPEC", spec_indices, "NO SPEC", non_spec_indices)
+        # non_spec_indices, spec_indices = list(range(len(non_spec_indices))), list(range(len(non_spec_indices), len(non_spec_indices) + len(spec_indices)))
+        # print("INDICES COMPUTED: SPEC", spec_indices, "NO SPEC", non_spec_indices)
 
         return (spec_indices, non_spec_indices, target_seq_group_metadata_list,
                 num_scoring_tokens)
