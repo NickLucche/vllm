@@ -1169,7 +1169,9 @@ class LLMEngine:
         # Skip the scheduler if there are any remaining steps in the seq groups.
         # This ensures that the scheduler is only called again when the current
         # batch has completed.
+        print("SCHEDULER: ", self._has_remaining_steps(seq_group_metadata_list))
         if not self._has_remaining_steps(seq_group_metadata_list):
+            print("SCHEDUUUULING")
             # Schedule iteration
             (seq_group_metadata_list, scheduler_outputs,
              allow_async_output_proc
