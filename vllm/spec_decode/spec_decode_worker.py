@@ -229,6 +229,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
         scorer_runner = getattr(self.scorer_worker, "model_runner", None)
+        print("PROPOSER/SCORER_WORKER/SCORER_RUNNER", self.proposer_worker, self.scorer_worker, scorer_runner)
         self.generators = scorer_runner.get_generators(
         ) if scorer_runner else None
         self.disable_by_batch_size = disable_by_batch_size or float("inf")
@@ -410,7 +411,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             disable_all_speculation, execute_model_req.seq_group_metadata_list)
 
         if no_spec:
-            print("RUN no spec")
+            print("RUN no spec, disable", disable_all_speculation)
             return self._run_no_spec(execute_model_req,
                                      skip_proposer=disable_all_speculation)
         print("SPECULATING")
@@ -469,9 +470,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         completion_seq_group_output_list: List[
             CompletionSequenceGroupOutput] = []
         for index, seq_id in enumerate(seq_ids):
+            # NOTE since we can get chunks here, we don't always have an output to serialize
             completion_seq_group_output_list.append(
                 create_sequence_group_output(
-                    token_id=sampled_token_ids_list[index][0],
+                    token_id=sampled_token_ids_list[index][0] if len(sampled_token_ids_list) else None,
                     token_id_logprob_rank=-1,
                     token_id_logprob=0.0,
                     seq_id=seq_id,
