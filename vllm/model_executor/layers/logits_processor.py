@@ -59,6 +59,7 @@ class LogitsProcessor(nn.Module):
 
             # Get the logits for the next tokens.
             logits = self._get_logits(hidden_states, lm_head, embedding_bias)
+        print("DIO CANE LOGITS", logits.shape)
         if logits is not None:
             if self.soft_cap is not None:
                 logits = logits / self.soft_cap
@@ -80,9 +81,11 @@ class LogitsProcessor(nn.Module):
         embedding_bias: Optional[torch.Tensor],
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
+        print("Final proj head hidden", hidden_states.shape)
         logits = lm_head.linear_method.apply(lm_head,
                                              hidden_states,
                                              bias=embedding_bias)
+        print("Final proj head logits", logits.shape)
         if self.use_gather:
             # None may be returned for rank > 0
             logits = tensor_model_parallel_gather(logits)
@@ -109,6 +112,7 @@ def _prune_hidden_states(
     hidden_states: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
+    print('PRUNING', hidden_states.shape, sampling_metadata.selected_token_indices)
     return hidden_states.index_select(0,
                                       sampling_metadata.selected_token_indices)
 

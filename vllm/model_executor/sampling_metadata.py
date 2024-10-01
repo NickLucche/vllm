@@ -165,6 +165,7 @@ class SamplingMetadata:
             num_prompts,
         ) = _prepare_seq_groups(seq_group_metadata_list, seq_lens, query_lens,
                                 device, generators, cache)
+        print("PREPARING TOKEN", selected_token_indices)
         selected_token_indices = async_tensor_h2d(selected_token_indices,
                                                   dtype=torch.long,
                                                   target_device=device,
@@ -303,7 +304,8 @@ def _prepare_seq_groups(
         hidden_states = model(...)
         logits = hidden_states[selected_token_indices]
         """
-
+        # TODO fix 
+        print("TO FIX", sampling_params.prompt_logprobs)
         if sampling_params.prompt_logprobs is not None:
             selected_token_indices.extend(
                 range(model_output_idx, model_output_idx + prompt_logprob_len))
@@ -311,6 +313,7 @@ def _prepare_seq_groups(
         if do_sample:
             selected_token_indices.extend(
                 range(model_output_idx, model_output_idx + sample_len))
+        print("TO FIX", sampling_params.prompt_logprobs, 'do_sample', do_sample)
         model_output_idx += sample_len
 
         # We now find indices for logprob computation and sampling.

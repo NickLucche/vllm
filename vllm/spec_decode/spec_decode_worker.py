@@ -470,16 +470,20 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         completion_seq_group_output_list: List[
             CompletionSequenceGroupOutput] = []
         for index, seq_id in enumerate(seq_ids):
-            # NOTE since we can get chunks here, we don't always have an output to serialize
-            completion_seq_group_output_list.append(
-                create_sequence_group_output(
-                    token_id=sampled_token_ids_list[index][0] if len(sampled_token_ids_list) else None,
-                    token_id_logprob_rank=-1,
-                    token_id_logprob=0.0,
-                    seq_id=seq_id,
-                    topk_token_ids=[],
-                    topk_logprobs=[],
-                ))
+            # NOTE since we can get chunks here, we don't always have a sampled token to serialize
+            has_token = len(sampled_token_ids_list) and index < len(sampled_token_ids_list)
+            if has_token:
+                completion_seq_group_output_list.append(
+                    create_sequence_group_output(
+                        token_id=sampled_token_ids_list[index][0],
+                        token_id_logprob_rank=-1,
+                        token_id_logprob=0.0,
+                        seq_id=seq_id,
+                        topk_token_ids=[],
+                        topk_logprobs=[],
+                    ))
+            else:
+                completion_seq_group_output_list.append(CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None))
         return SamplerOutput(outputs=completion_seq_group_output_list)
 
     @nvtx_range("spec_decode_worker._run_no_spec")

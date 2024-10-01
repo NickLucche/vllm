@@ -1196,7 +1196,8 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{speculative_disable_by_batch_size=}")
 
-        # if enable_chunked_prefill:
+        if enable_chunked_prefill:
+            print("ENAAABLEEEED"+"*"*40+"="*40)
         #     raise ValueError(
         #         "Speculative decoding and chunked prefill are "
         #         f"currently mutually exclusive ({enable_chunked_prefill=}).")
