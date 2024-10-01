@@ -65,6 +65,15 @@ from .conftest import (get_output_from_llm_generator,
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
+            "enable_chunked_prefill": False
+        },
+        {
+            "speculative_model": "JackFram/llama-68m",
+            "num_speculative_tokens": 5,
+            # chunked prefill with low value to make sure we get mixed batches
+            "enable_chunked_prefill": True,
+            "max_num_batched_tokens": 4,
+            "max_num_seqs": 4
         },
         {
             # Verify the detokenizer assertions in the test work when spec
@@ -74,7 +83,6 @@ from .conftest import (get_output_from_llm_generator,
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
-@pytest.mark.parametrize("enable_chunked_prefill", [True, False])
 @fork_new_process_for_each_test
 def test_spec_decode_e2e_with_detokenization(test_llm_generator,
                                              batch_size: int):
