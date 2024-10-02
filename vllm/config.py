@@ -1209,9 +1209,10 @@ class SpeculativeConfig:
         # Reminder: Please update docs/source/serving/compatibility_matrix.rst
         # If the feature combo become valid
         if enable_chunked_prefill:
-            raise ValueError(
-                "Speculative decoding and chunked prefill are "
-                f"currently mutually exclusive ({enable_chunked_prefill=}).")
+            print("Enableeeed!!")
+            # raise ValueError(
+            #     "Speculative decoding and chunked prefill are "
+            #     f"currently mutually exclusive ({enable_chunked_prefill=}).")
 
         if not use_v2_block_manager:
             raise ValueError(

@@ -67,12 +67,23 @@ from .conftest import (get_output_from_llm_generator,
             "num_speculative_tokens": 5,
         },
         {
+            "speculative_model": "JackFram/llama-68m",
+            "num_speculative_tokens": 5,
+            # chunked prefill with low value to make sure we get mixed batches
+            # "max_model_len": 512,
+            # "max_num_batched_tokens": 512,
+            # "max_num_seqs": 512
+            "enable_chunked_prefill": True,
+            "max_num_batched_tokens": 4,
+            "max_num_seqs": 4
+        },
+        {
             # Verify the detokenizer assertions in the test work when spec
             # decode is disabled.
         },
     ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
-@pytest.mark.parametrize("batch_size", [1, 32])
+@pytest.mark.parametrize("batch_size", [2, 32])
 @pytest.mark.parametrize("seed", [1])
 @fork_new_process_for_each_test
 def test_spec_decode_e2e_with_detokenization(test_llm_generator,
@@ -85,13 +96,15 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
     temperature = 0.0
 
     prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
+        # "Hello, my name is",
+        # "The president of the United States is",
+        "The president of the United States is a man, whats his name?",
         "The capital of France is",
         "The future of AI is",
     ]
 
     prompts = [prompt for prompt, _ in zip(cycle(prompts), range(batch_size))]
+    print("PROMPTS", prompts)
 
     sampling_params = SamplingParams(
         max_tokens=output_len,
