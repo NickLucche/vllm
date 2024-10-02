@@ -1203,9 +1203,10 @@ class SpeculativeConfig:
                              f"{speculative_disable_by_batch_size=}")
 
         if enable_chunked_prefill:
-            raise ValueError(
-                "Speculative decoding and chunked prefill are "
-                f"currently mutually exclusive ({enable_chunked_prefill=}).")
+            print("Enableeeed!!")
+            # raise ValueError(
+            #     "Speculative decoding and chunked prefill are "
+            #     f"currently mutually exclusive ({enable_chunked_prefill=}).")
 
         if not use_v2_block_manager:
             raise ValueError(

@@ -365,7 +365,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         for sg in execute_model_req.seq_group_metadata_list:
             if sg.is_prompt:
                 sg.num_speculative_tokens = 0
-        print("PROMPTS: ", [(sg.is_prompt, sg.num_speculative_tokens, sg.token_chunk_size) for sg in execute_model_req.seq_group_metadata_list])
+        # K can be None global one is used
+        print("PROMPTS (is prompt, K, token_chunk): ", [(sg.is_prompt, sg.num_speculative_tokens, sg.token_chunk_size) for sg in execute_model_req.seq_group_metadata_list])
 
         # Speculative decoding is disabled in the following cases:
         # 1. Prefill phase: Speculative decoding is not
@@ -733,7 +734,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             self.previous_hidden_states = HiddenStates(
                 hidden_states, seq_group_metadata_list,
                 second_last_token_hidden_states)
-
+        print("VERIFY STEP ENDED", accepted_token_ids)
         return accepted_token_ids, logprobs
 
     def _create_output_sampler_list(
@@ -749,6 +750,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         The output is padded with -1 tokens such that each sequence has
         the same number of outputs.
         """
+        # TOOD can be skipped earlier
+        # remove chunked prefill output which may end up here as rows with just -1s
+        rows, _ = torch.where(accepted_token_ids>=0) 
+        # lets pop the sequencegroup as it was never there
+        if len(rows.unique()) < accepted_token_ids.shape[0]:
+            seq_group_metadata_list = [sg for sg in seq_group_metadata_list if not sg.is_prompt]
+        # all rows where at least one element is not -1
+        accepted_token_ids = accepted_token_ids[rows.unique()]
         batch_size, num_steps = accepted_token_ids.shape
         accepted_token_ids_by_step = accepted_token_ids.transpose(0, 1)
         if self._disable_logprobs:
@@ -785,6 +794,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Construct the output on a per-step, per-sequence basis.
         sampler_output_list: List[SamplerOutput] = []
         for step_index in range(num_steps):
+            # can be made faster [[-1, 1576], [-1, 29884], [-1, -1], [-1, -1], [-1, -1], [-1, -1]]
             if all(token_id == -1
                    for token_id in accepted_token_ids_by_step[step_index]):
                 break
@@ -807,6 +817,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                         topk_logprobs=topk_logprobs_by_step[step_index]
                         [sequence_index][:num_logprobs],
                     ))
+            # TODO on mixed prefill-decode batches, len(outputs) should be len(decodes)
+            # not quite cause you still get up to T outputs
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
 
@@ -825,7 +837,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             # This is periodic because the rejection sampler emits metrics
             # periodically.
             self._maybe_log_stage_times(*stage_times)
-
         return sampler_output_list
 
     def _maybe_log_stage_times(self, average_time_per_proposal_tok_ms: float,

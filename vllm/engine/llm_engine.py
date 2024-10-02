@@ -1003,7 +1003,10 @@ class LLMEngine:
             assert seq_group_meta.is_prompt
 
             token_chunk_size = seq_group_meta.token_chunk_size
-
+            print("inputs", seq_group)
+            print("inputs", seq_group_meta)
+            print("inputs", num_outputs)
+            print("inputs", is_first_step_output)
             if num_outputs == 1:
                 assert is_first_step_output is not None
 
@@ -1014,8 +1017,7 @@ class LLMEngine:
 
                 # multi-step prefill is only supported when multi-step is
                 # enabled with chunked prefill
-                assert self.scheduler_config.is_multi_step and \
-                        self.scheduler_config.chunked_prefill_enabled
+                assert self.scheduler_config.chunked_prefill_enabled
                 if is_first_step_output is True:
                     # This sequence is a prompt during the first step only.
                     seq_group.update_num_computed_tokens(token_chunk_size)
@@ -1026,8 +1028,7 @@ class LLMEngine:
             # multi-step prefill is only supported when multi-step is
             # enabled with chunked prefill. Outputs from all the steps are
             # submitted in a single burst.
-            assert self.scheduler_config.is_multi_step and \
-                    self.scheduler_config.chunked_prefill_enabled
+            assert self.scheduler_config.chunked_prefill_enabled
             assert num_outputs == seq_group_meta.state.num_steps, \
                 f"#outputs {len(outputs)} - num steps {seq_group_meta.state.num_steps}" #noqa
             # This sequence is a prompt during the first step only.
@@ -1086,6 +1087,8 @@ class LLMEngine:
 
         finished_before: List[int] = []
         finished_now: List[int] = []
+        print("LLM process output indices", indices)
+        print("OUTPUTS PER SEQ GROUP (ONE IS PROMPT THE OTHER NOT)", outputs_by_sequence_group)
         for i in indices:
             if i in skip:
                 continue
@@ -1098,18 +1101,26 @@ class LLMEngine:
             if seq_group.is_finished():
                 finished_before.append(i)
                 continue
-
             if has_multiple_outputs:
                 output = outputs_by_sequence_group[i]
             else:
                 output = [outputs_by_sequence_group[0][i]]
+            print("output has multiples", has_multiple_outputs, len(outputs))
+            # print("Entering update_prefill_num_computed_tokens?", not is_async, seq_group_meta.is_prompt, self.scheduler_config.is_multi_step)
 
-            if not is_async and seq_group_meta.is_prompt:
+            # TODO we must update num of computed tokens here to have scheduler move on
+            if self.scheduler_config.is_multi_step and not is_async and seq_group_meta.is_prompt:
+                # TODO issue is that we enter here casue we have a prompt but then
+                # the assertion expects we are in multistep
                 # Updates for all decodes happen when we actually append the
                 # token ids to the seq in process_outputs.
+                print("update_prefill_num_computed_tokens in LLM process output")
                 update_prefill_num_computed_tokens(seq_group, seq_group_meta,
                                                    len(output),
                                                    is_first_step_output)
+            elif not is_async and seq_group_meta.is_prompt:
+                print("Updating computed tokens manually")
+                seq_group.update_num_computed_tokens(seq_group_meta.token_chunk_size)
 
             if outputs:
                 for o in outputs:
@@ -1396,6 +1407,7 @@ class LLMEngine:
 
             outputs = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
+            print("LLM STep outputs", outputs)
 
             # We need to do this here so that last step's sampled_token_ids can
             # be passed to the next iteration for PP.

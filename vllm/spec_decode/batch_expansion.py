@@ -82,7 +82,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
              proposal_lens_list=proposal_lens_list,
          )
         
-        print("SCORING ON THE UNION OF REQUESTS", [t.is_prompt for t in target_seq_group_metadata_list])
+        print("SCORING ON THE UNION OF REQUESTS (includes expanded batch), is prompt?", [t.is_prompt for t in target_seq_group_metadata_list])
         target_sampler_output = self._scorer_worker.execute_model(
             execute_model_req=execute_model_req.clone(
                 seq_group_metadata_list=target_seq_group_metadata_list))
@@ -107,6 +107,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 spec_indices=spec_indices,
                 k=execute_model_req.num_lookahead_slots,
             )
+            # print("Folded batch!", contracted)
 
         all_tokens, all_probs, spec_logprobs, all_hidden_states = contracted
         return SpeculativeScores(
@@ -177,7 +178,9 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         # The number of tokens in the expanded batch used for speculation is
         # equal to the total expanded batch size minus the number of samples for
         # non-speculative sequences.
-        non_spec_expanded_bs = len(non_spec_target_token_ids)
+        # non_spec_expanded_bs = len(non_spec_target_token_ids)
+        # predicted tokens may be empty when chunking, but the batch still has non-spec elements 
+        non_spec_expanded_bs = max(len(non_spec_indices), len(non_spec_target_token_ids))
         spec_expanded_bs = expanded_batch_size - non_spec_expanded_bs
 
         target_token_ids = target_token_ids.reshape(spec_expanded_bs, k + 1)
@@ -201,7 +204,9 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         else:
             all_hidden_states = None
 
-        if non_spec_indices:
+        # rule out the chunk prefill case, where you have non_spec_indices but no tokens
+        # if non_spec_indices:
+        if len(non_spec_target_token_ids):
             all_tokens[non_spec_indices, :1] = \
                 non_spec_target_token_ids.unsqueeze(1)
             all_probs[non_spec_indices, :1, :] = \
