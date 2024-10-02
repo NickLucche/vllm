@@ -360,6 +360,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         disable_all_speculation = self._should_disable_all_speculation(
             execute_model_req)
         num_lookahead_slots = execute_model_req.num_lookahead_slots
+        # Make sure prefill requests have spec turned off, scheduler just sets the request
+        # to the global value lookeahead value
+        for sg in execute_model_req.seq_group_metadata_list:
+            if sg.is_prompt:
+                sg.num_speculative_tokens = 0
+        print("PROMPTS: ", [(sg.is_prompt, sg.num_speculative_tokens, sg.token_chunk_size) for sg in execute_model_req.seq_group_metadata_list])
 
         # Speculative decoding is disabled in the following cases:
         # 1. Prefill phase: Speculative decoding is not
@@ -401,6 +407,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             disable_all_speculation, execute_model_req.seq_group_metadata_list)
 
         if no_spec:
+            print("NO SPEC")
             return self._run_no_spec(execute_model_req,
                                      skip_proposer=disable_all_speculation)
         return self._run_speculative_decoding_step(execute_model_req,
@@ -491,15 +498,20 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             else:
                 prompt_logprobs = None
 
-            completion_seq_group_output_list.append(
-                create_sequence_group_output(
-                    token_id=sampled_token_ids_list[index][0],
-                    token_id_logprob_rank=-1,
-                    token_id_logprob=0.0,
-                    seq_id=seq_id,
-                    topk_token_ids=[],
-                    topk_logprobs=[],
-                    prompt_logprobs=prompt_logprobs))
+            # NOTE since we can get chunks here, we don't always have a sampled token to serialize
+            has_token = len(sampled_token_ids_list) and index < len(sampled_token_ids_list)
+            if has_token:
+                completion_seq_group_output_list.append(
+                    create_sequence_group_output(
+                        token_id=sampled_token_ids_list[index][0],
+                        token_id_logprob_rank=-1,
+                        token_id_logprob=0.0,
+                        seq_id=seq_id,
+                        topk_token_ids=[],
+                        topk_logprobs=[],
+                        prompt_logprobs=prompt_logprobs))
+            else:
+                completion_seq_group_output_list.append(CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None))
         return SamplerOutput(outputs=completion_seq_group_output_list)
 
     @nvtx_range("spec_decode_worker._run_no_spec")

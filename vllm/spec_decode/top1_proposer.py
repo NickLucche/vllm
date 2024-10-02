@@ -59,6 +59,8 @@ class Top1Proposer(SpeculativeProposer):
             nonzero_proposal_len_indices,
         ) = self._split_by_proposal_len(seq_group_metadata_list, proposal_len)
 
+        # TODO run on non spec
+        
         if nonzero_proposal_len_seqs:
             # Speculate tokens using the draft worker for the speculative
             # sequences.
