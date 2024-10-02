@@ -561,37 +561,6 @@ def fork_new_process_for_each_test(
     return wrapper
 
 
-def large_gpu_test(*, min_gb: int):
-    """
-    Decorate a test to be skipped if no GPU is available or it does not have
-    sufficient memory.
-
-    Currently, the CI machine uses L4 GPU which has 24 GB VRAM.
-    """
-    try:
-        if current_platform.is_cpu():
-            memory_gb = 0
-        else:
-            memory_gb = current_platform.get_device_total_memory() / GB_bytes
-    except Exception as e:
-        warnings.warn(
-            f"An error occurred when finding the available memory: {e}",
-            stacklevel=2,
-        )
-
-        memory_gb = 0
-
-    test_skipif = pytest.mark.skipif(
-        memory_gb < min_gb,
-        reason=f"Need at least {memory_gb}GB GPU memory to run the test.",
-    )
-
-    def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
-        return test_skipif(fork_new_process_for_each_test(f))
-
-    return wrapper
-
-
 def multi_gpu_test(*, num_gpus: int):
     """
     Decorate a test to be run only when multiple GPUs are available.

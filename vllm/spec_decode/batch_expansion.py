@@ -74,7 +74,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
              proposal_token_ids_list=proposal_token_ids_list_without_skips,
              proposal_lens_list=proposal_lens_list,
          )
-
+        
+        print("SCORING ON THE UNION OF REQUESTS", [t.is_prompt for t in target_seq_group_metadata_list])
         target_sampler_output = self._scorer_worker.execute_model(
             execute_model_req=execute_model_req.clone(
                 seq_group_metadata_list=target_seq_group_metadata_list))
@@ -88,6 +89,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 proposals=proposals,
             )
         else:
+            print("MIXEEED BATCH BOYS!")
             # Batch has a mix of spec decode enabled and disabled seq groups
             contracted = self._contract_batch(
                 contracted_bs=len(execute_model_req.seq_group_metadata_list),
@@ -136,6 +138,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         )
 
         num_scoring_tokens = len(target_seq_group_metadata_list)
+        # batch speculative and non-speculative (eg chunked prefill) requests
         target_seq_group_metadata_list.extend(non_spec_seqs)
 
         return (spec_indices, non_spec_indices, target_seq_group_metadata_list,
