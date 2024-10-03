@@ -517,45 +517,55 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             if any(seq_output_prompt_logprobs) else \
                 sampler_output.sampled_token_ids).tolist()
 
-        seq_data_entries = (
+        seq_data_entries = [
             (seq_id, seq_data) for sg in \
             execute_model_req.seq_group_metadata_list \
             for seq_id, seq_data in sg.seq_data.items()
-        )
+        ]
         completion_seq_group_output_list: List[
             CompletionSequenceGroupOutput] = []
-        for index, ((seq_id, seq_data), needs_prompt_logprobs) in \
-            enumerate(zip(seq_data_entries, seq_output_prompt_logprobs)):
-            if needs_prompt_logprobs:
-                prompt_token_ids = seq_data.get_prompt_token_ids()
-                prompt_logprobs = [
-                    create_logprobs_output(
-                        token_id=p_token_id,
-                        token_id_logprob_rank=-1,
-                        token_id_logprob=0.0,
-                        topk_token_ids=[],
-                        topk_logprobs=[],
-                    )
-                    # no prompt logprobs for the first token
-                    for p_token_id in prompt_token_ids[1:]
-                ]
+        # NOTE it may happen that a chunk has no output but the other element does (ie last chunk or decode)
+        # you have to make sure the chunk here is still aligned with its own empty output or you mess up the pairing
+        output_index = 0 
+        # for index, ((seq_id, seq_data), needs_prompt_logprobs) in \
+        #     enumerate(zip(seq_data_entries, seq_output_prompt_logprobs)):
+        for seq_group_meta in execute_model_req.seq_group_metadata_list:
+            # NOTE since we can get chunks here, we don't always have a sampled token (hence no output) 
+            # to serialize (only on last chunk), but we have to keep it aligned
+            if not seq_group_meta.do_sample:
+                # no token
+                completion_seq_group_output_list.append(CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None))
             else:
-                prompt_logprobs = None
+                # sequence with output
+                seq_id, seq_data = seq_data_entries[output_index]
+                needs_prompt_logprobs = seq_output_prompt_logprobs[output_index]
+                # has_token = len(sampled_token_ids_list) and index < len(sampled_token_ids_list)
+                if needs_prompt_logprobs:
+                    prompt_token_ids = seq_data.get_prompt_token_ids()
+                    prompt_logprobs = [
+                        create_logprobs_output(
+                            token_id=p_token_id,
+                            token_id_logprob_rank=-1,
+                            token_id_logprob=0.0,
+                            topk_token_ids=[],
+                            topk_logprobs=[],
+                        )
+                        # no prompt logprobs for the first token
+                        for p_token_id in prompt_token_ids[1:]
+                    ]
+                else:
+                    prompt_logprobs = None
 
-            # NOTE since we can get chunks here, we don't always have a sampled token to serialize
-            has_token = len(sampled_token_ids_list) and index < len(sampled_token_ids_list)
-            if has_token:
                 completion_seq_group_output_list.append(
                     create_sequence_group_output(
-                        token_id=sampled_token_ids_list[index][0],
+                        token_id=sampled_token_ids_list[output_index][0],
                         token_id_logprob_rank=-1,
                         token_id_logprob=0.0,
                         seq_id=seq_id,
                         topk_token_ids=[],
                         topk_logprobs=[],
                         prompt_logprobs=prompt_logprobs))
-            else:
-                completion_seq_group_output_list.append(CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None))
+                output_index += 1
         return SamplerOutput(outputs=completion_seq_group_output_list)
 
     @nvtx_range("spec_decode_worker._run_no_spec")
@@ -569,6 +579,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
 
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
+        meta = execute_model_req.seq_group_metadata_list
+        print("DO sample", [m.do_sample for m in meta])
+        print("NO SPEC TARGET OUT AND DO_SAMPLE", list(zip(sampler_output, (m.do_sample for m in meta) )))
+        print("="*80)
         assert len(sampler_output) == 1
         sampler_output = sampler_output[0]
 
@@ -880,6 +894,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             # This is periodic because the rejection sampler emits metrics
             # periodically.
             self._maybe_log_stage_times(*stage_times)
+        print(f"SAMPLER OUTPUT LIST {len(sampler_output_list)}x{len(sampler_output_list[0].outputs)}")
         return sampler_output_list
 
     def _maybe_log_stage_times(self, average_time_per_proposal_tok_ms: float,
