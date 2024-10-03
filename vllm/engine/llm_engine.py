@@ -1108,7 +1108,6 @@ class LLMEngine:
             print("output has multiples", has_multiple_outputs, len(outputs))
             # print("Entering update_prefill_num_computed_tokens?", not is_async, seq_group_meta.is_prompt, self.scheduler_config.is_multi_step)
 
-            # TODO we must update num of computed tokens here to have scheduler move on
             if self.scheduler_config.is_multi_step and not is_async and seq_group_meta.is_prompt:
                 # TODO issue is that we enter here casue we have a prompt but then
                 # the assertion expects we are in multistep
@@ -1118,8 +1117,12 @@ class LLMEngine:
                 update_prefill_num_computed_tokens(seq_group, seq_group_meta,
                                                    len(output),
                                                    is_first_step_output)
+            # elif not is_async and self.scheduler_config.chunked_prefill_enabled and seq_group_meta.is_prompt:
             elif not is_async and seq_group_meta.is_prompt:
+                # update num of computed tokens here to have scheduler move on
                 print("Updating computed tokens manually")
+                print("META DO_SAMPLE", seq_group_meta.do_sample)
+                print("OUT", output, "\n\n\n")
                 seq_group.update_num_computed_tokens(seq_group_meta.token_chunk_size)
 
             if outputs:
