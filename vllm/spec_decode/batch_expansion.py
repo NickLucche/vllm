@@ -76,6 +76,11 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
          )
         
         print("SCORING ON THE UNION OF REQUESTS (includes expanded batch), is prompt?", [t.is_prompt for t in target_seq_group_metadata_list])
+        print("SCORING ON THE UNION OF REQUESTS (includes expanded batch), do_sample?", [t.do_sample for t in target_seq_group_metadata_list])
+        if non_spec_indices:
+            # TODO check prompts to know if chunk order is right
+            print("MIXEEED BATCH BOYS!")
+            
         target_sampler_output = self._scorer_worker.execute_model(
             execute_model_req=execute_model_req.clone(
                 seq_group_metadata_list=target_seq_group_metadata_list))
@@ -89,7 +94,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 proposals=proposals,
             )
         else:
-            print("MIXEEED BATCH BOYS!")
             # Batch has a mix of spec decode enabled and disabled seq groups
             contracted = self._contract_batch(
                 contracted_bs=len(execute_model_req.seq_group_metadata_list),
@@ -108,7 +112,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             token_ids=all_tokens,
             logprobs=spec_logprobs,
             hidden_states=all_hidden_states,
-        )
+        ), non_spec_indices, target_sampler_output
 
     def _expand_batch(
         self,
@@ -140,6 +144,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
         num_scoring_tokens = len(target_seq_group_metadata_list)
         # batch speculative and non-speculative (eg chunked prefill) requests
+        # TODO sure you dont have to order this as prefill | decode ? 
         target_seq_group_metadata_list.extend(non_spec_seqs)
 
         return (spec_indices, non_spec_indices, target_seq_group_metadata_list,
@@ -298,9 +303,9 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         This function creates K+1 target SequenceGroupMetadata to take
         advantage of the bonus token.
         """
-        assert not input_seq_group_metadata.is_prompt, (
-            "Speculating on "
-            "prompts not yet supported")
+        # assert not input_seq_group_metadata.is_prompt, (
+        #     "Speculating on "
+        #     "prompts not yet supported")
         assert len(input_seq_group_metadata.seq_data) == 1, (
             "Beam search "
             "not supported in speculative decoding")

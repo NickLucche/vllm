@@ -59,12 +59,16 @@ class Top1Proposer(SpeculativeProposer):
             nonzero_proposal_len_seqs,
             nonzero_proposal_len_indices,
         ) = self._split_by_proposal_len(seq_group_metadata_list, proposal_len)
+        assert len(prefill_seqs) + len(nonzero_proposal_len_indices) == len(seq_group_metadata_list)
 
         # sync KV cache proposal
         # for now, run this in a separate forward, it can be optimized to run batched with the first iter of the decodes
-        if len(prefill_seqs):
-            prefill_req = execute_model_req.clone(prefill_seqs)
-            self._worker.execute_model(prefill_req)
+        # if len(prefill_seqs):
+        #     # TODO execute after proposer for some reason like in no_spec..?
+        #     from spec_decode_worker import prepare_prefill_hidden_states
+        #     execute_model_req.previous_hidden_states = prepare_prefill_hidden_states(sampler_output.prefill_hidden_states)
+        #     prefill_req = execute_model_req.clone(prefill_seqs)
+        #     self._worker.execute_model(prefill_req)
         
         if nonzero_proposal_len_seqs:
             # Speculate tokens using the draft worker for the speculative
@@ -115,7 +119,7 @@ class Top1Proposer(SpeculativeProposer):
             proposal_token_ids=proposal_tokens,
             proposal_probs=proposal_probs,
             proposal_lens=proposal_lens,
-            no_proposals=maybe_sampler_output is None)
+            no_proposals=maybe_sampler_output is None), prefill_seqs
 
         return proposals
 
@@ -137,7 +141,9 @@ class Top1Proposer(SpeculativeProposer):
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             # The speculative decoding for this request has been disabled
             # (e.g. due to high traffic).
-            if seq_group_metadata.num_speculative_tokens == 0:
+            # TODO for some reason unless you set it, prompt request have None as `num_speculative_tokens`
+            # hence they end up among the sequences to speculate on
+            if (seq_group_metadata.is_prompt and seq_group_metadata.num_speculative_tokens is None) or seq_group_metadata.num_speculative_tokens == 0:
                 proposal_lens.append(0)
                 prefill_seqs.append(seq_group_metadata)
                 continue
