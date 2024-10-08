@@ -586,7 +586,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
         meta = execute_model_req.seq_group_metadata_list
-        print("DO sample", [m.do_sample for m in meta])
         print("NO SPEC TARGET OUT AND DO_SAMPLE", list(zip(sampler_output, (m.do_sample for m in meta) )))
         print("="*80)
         assert len(sampler_output) == 1
@@ -694,7 +693,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         prefill.extend(decode)
         og_model_req = execute_model_req
         execute_model_req = execute_model_req.clone(prefill)
-        print("SPECULATIING WITH REQ METADATA", execute_model_req.seq_group_metadata_list)
         assert num_lookahead_slots == execute_model_req.num_lookahead_slots
 
         # Pass last hidden states from target model to proposer
@@ -740,7 +738,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 print("HIDDEN STATE DIFFERENCE??", target_sampler_output.prefill_hidden_states, "\n",prefill_hidden_states,"\n\n\n")
                 execute_model_req.previous_hidden_states = prepare_prefill_hidden_states(prefill_hidden_states)
             # sync kv cache
-            print("Running PROPOSEr ON", prefill_seqs)
             prefill_req = execute_model_req.clone(prefill_seqs)
             self.proposer_worker.execute_model(prefill_req)
 
@@ -805,8 +802,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         # Get probabilities according to proposal method.
         proposal_probs = proposals.proposal_probs[spec_indices]
-        print("Draft probs distr", proposal_probs.min(), proposal_probs.mean(), proposal_probs.max(), proposal_probs.shape)
-
+        
         # Get proposed tokens.
         proposal_token_ids = proposals.proposal_token_ids[spec_indices]
 
