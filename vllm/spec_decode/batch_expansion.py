@@ -119,7 +119,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 spec_indices=spec_indices,
                 k=execute_model_req.num_lookahead_slots,
             )
-            # print("Folded batch!", contracted)
 
         all_tokens, all_probs, spec_logprobs, all_hidden_states = contracted
         return SpeculativeScores(
@@ -223,7 +222,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         if len(non_spec_target_token_ids):
             print("FINAL CHUNK WITH do_sample=True here in contract batch", non_spec_target_token_ids, non_spec_target_token_ids.shape)
             # all_tokens[non_spec_indices]
-            # TODO is this ok? tensor([[13, -1, -1, -1, -1, -1]], device='cuda:0')
+            # tensor([[13, -1, -1, -1, -1, -1]], device='cuda:0')
             all_tokens[non_spec_indices, :1] = \
                 non_spec_target_token_ids.unsqueeze(1)
             all_probs[non_spec_indices, :1, :] = \

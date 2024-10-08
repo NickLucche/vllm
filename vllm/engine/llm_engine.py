@@ -1087,8 +1087,6 @@ class LLMEngine:
 
         finished_before: List[int] = []
         finished_now: List[int] = []
-        print("LLM process output indices", indices)
-        print("OUTPUTS PER SEQ GROUP (ONE IS PROMPT THE OTHER NOT)", outputs_by_sequence_group)
         for i in indices:
             if i in skip:
                 continue
@@ -1105,8 +1103,6 @@ class LLMEngine:
                 output = outputs_by_sequence_group[i]
             else:
                 output = [outputs_by_sequence_group[0][i]]
-            print("output has multiples", has_multiple_outputs, len(outputs))
-            # print("Entering update_prefill_num_computed_tokens?", not is_async, seq_group_meta.is_prompt, self.scheduler_config.is_multi_step)
 
             if self.scheduler_config.is_multi_step and not is_async and seq_group_meta.is_prompt:
                 # TODO issue is that we enter here casue we have a prompt but then
@@ -1145,6 +1141,8 @@ class LLMEngine:
             if self.model_config.embedding_mode:
                 self._process_sequence_group_outputs(seq_group, output)
             else:
+                print("SEQ GROUP SHOULD SAMPLE HERE", seq_group_meta.do_sample)
+                print(seq_group)
                 self.output_processor.process_prompt_logprob(seq_group, output)
                 if seq_group_meta.do_sample:
                     self.output_processor.process_outputs(
