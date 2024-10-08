@@ -677,6 +677,23 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         Returns a list of SamplerOutput, each containing a single token per
         sequence.
         """
+        # NOTE sort by prompt first, inplace so other steps use same order and model-runner gets prefill|decode
+        prefill, decode, og_permutation = [], [], [-1]*len(execute_model_req.seq_group_metadata_list)
+        for i, sg in enumerate(execute_model_req.seq_group_metadata_list):
+            if sg.is_prompt:
+                prefill.append(sg)
+                og_permutation[i] = len(prefill)-1 
+            else:
+                decode.append(sg)
+        decode_counter = 0
+        for i in range(len(og_permutation)):
+            if og_permutation[i] == -1:
+                # decode request position
+                og_permutation[i] = decode_counter + len(prefill) 
+                decode_counter += 1
+        prefill.extend(decode)
+        og_model_req = execute_model_req
+        execute_model_req = execute_model_req.clone(prefill)
         print("SPECULATIING WITH REQ METADATA", execute_model_req.seq_group_metadata_list)
         assert num_lookahead_slots == execute_model_req.num_lookahead_slots
 
@@ -723,6 +740,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 print("HIDDEN STATE DIFFERENCE??", target_sampler_output.prefill_hidden_states, "\n",prefill_hidden_states,"\n\n\n")
                 execute_model_req.previous_hidden_states = prepare_prefill_hidden_states(prefill_hidden_states)
             # sync kv cache
+            print("Running PROPOSEr ON", prefill_seqs)
             prefill_req = execute_model_req.clone(prefill_seqs)
             self.proposer_worker.execute_model(prefill_req)
 
@@ -730,6 +748,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             accepted_token_ids, target_logprobs = self._verify_tokens(
                 execute_model_req.seq_group_metadata_list, proposal_scores,
                 proposals, execute_model_req.num_lookahead_slots)
+
+        if og_permutation != list(range(len(og_permutation))):
+            print("REORDERING", og_permutation)
+            print('tokens', accepted_token_ids, accepted_token_ids[og_permutation])
+        # restore original requests order
+        execute_model_req = og_model_req
+        accepted_token_ids = accepted_token_ids[og_permutation]
+        target_logprobs = target_logprobs[og_permutation]
 
         stage_times = (proposal_timer.elapsed_time_ms / num_lookahead_slots,
                        scoring_timer.elapsed_time_ms,
@@ -769,11 +795,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Get probabilities of target model, including bonus tokens.
         proposal_verifier_probs = proposal_scores.probs[spec_indices]
 
-        # TODO same value regardless..?? I'd expect the model to output less precise distr
-        # Target probs distr tensor(0., device='cuda:0') tensor(3.1250e-05, device='cuda:0') tensor(1., device='cuda:0') torch.Size([4, 6, 32000])
         print("Proposal len X do_sample X is_prompt", list(zip(proposal_lens_list,[(sg.do_sample,sg.is_prompt) for sg in seq_group_metadata_list])))
-        print("Target probs distr", proposal_verifier_probs.min(), proposal_verifier_probs.mean(), proposal_verifier_probs.max(), proposal_verifier_probs.shape)
-        print("Target probs distr argmax", proposal_verifier_probs.argmax(dim=2))
 
         # Get non-speculative sampled tokens from target model.
         non_spec_token_ids = proposal_scores.token_ids[non_spec_indices]
@@ -917,8 +939,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                         topk_logprobs=topk_logprobs_by_step[step_index]
                         [sequence_index][:num_logprobs],
                     ))
-            # TODO on mixed prefill-decode batches, len(outputs) should be len(decodes)
-            # not quite cause you still get up to T outputs
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
 
