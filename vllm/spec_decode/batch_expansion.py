@@ -85,8 +85,16 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         print("SCORING ON THE UNION OF REQUESTS (includes expanded batch), is prompt?", [t.is_prompt for t in target_seq_group_metadata_list])
         print("SCORING ON THE UNION OF REQUESTS (includes expanded batch), do_sample?", [t.do_sample for t in target_seq_group_metadata_list])
         if non_spec_indices:
-            # TODO check prompts to know if chunk order is right
+            # TODO check prompts to know if chunk order is right, do the same with regular workflow in worker!!
             print("MIXEEED BATCH BOYS!")
+            from transformers import AutoTokenizer
+            tok = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
+            # for sg in execute_model_req.seq_group_metadata_list:
+            for sg in target_seq_group_metadata_list:
+                for k, v in sg.seq_data.items():
+                    # print(k, "PROMPT TOKENS TO STR", v.prompt_token_ids, "=>", tok.decode(v.prompt_token_ids))
+                    print(k, "GETTOKENS TOKENS TO STR", v.get_token_ids(), "=>", tok.decode(v.get_token_ids()))
+
             
         target_sampler_output = self._scorer_worker.execute_model(
             execute_model_req=execute_model_req.clone(
@@ -152,9 +160,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         num_scoring_tokens = len(target_seq_group_metadata_list)
         # batch speculative and non-speculative (eg chunked prefill) requests
         # TODO sure you dont have to order this as prefill | decode ? 
-        target_seq_group_metadata_list.extend(non_spec_seqs)
+        # target_seq_group_metadata_list.extend(non_spec_seqs)
+        non_spec_seqs.extend(target_seq_group_metadata_list)
 
-        return (spec_indices, non_spec_indices, target_seq_group_metadata_list,
+        return (spec_indices, non_spec_indices, non_spec_seqs,
                 num_scoring_tokens)
 
     def _contract_batch(
@@ -184,7 +193,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         # equal to the total expanded batch size minus the number of samples for
         # non-speculative sequences.
         # non_spec_expanded_bs = len(non_spec_target_token_ids)
-        # predicted tokens may be empty when chunking, but the batch still has non-spec elements 
+        # predicted tokens may be empty when chunking  (do_sample=False for first chunks), but the batch still has non-spec elements 
         non_spec_expanded_bs = max(len(non_spec_indices), len(non_spec_target_token_ids))
         spec_expanded_bs = expanded_batch_size - non_spec_expanded_bs
 
@@ -209,9 +218,12 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         else:
             all_hidden_states = None
 
-        # rule out the chunk prefill case, where you have non_spec_indices but no tokens
+        # rule out the chunk prefill case (first chunks do_sample=False), where you have non_spec_indices but no tokens
         # if non_spec_indices:
         if len(non_spec_target_token_ids):
+            print("FINAL CHUNK WITH do_sample=True here in contract batch", non_spec_target_token_ids, non_spec_target_token_ids.shape)
+            # all_tokens[non_spec_indices]
+            # TODO is this ok? tensor([[13, -1, -1, -1, -1, -1]], device='cuda:0')
             all_tokens[non_spec_indices, :1] = \
                 non_spec_target_token_ids.unsqueeze(1)
             all_probs[non_spec_indices, :1, :] = \
