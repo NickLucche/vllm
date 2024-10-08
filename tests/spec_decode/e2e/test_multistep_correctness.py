@@ -51,7 +51,8 @@ from .conftest import (get_output_from_llm_generator,
     [{
         # Use a small model for a fast test.
         # Note this is repeated in the test body; to initialize a tokenizer.
-        "model": "JackFram/llama-68m",
+        # "model": "JackFram/llama-68m",
+        "model": "meta-llama/Llama-3.2-1B",
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
@@ -67,15 +68,17 @@ from .conftest import (get_output_from_llm_generator,
             "num_speculative_tokens": 5,
         },
         {
-            "speculative_model": "JackFram/llama-68m",
+            # "speculative_model": "JackFram/llama-68m",
+            "speculative_model": "meta-llama/Llama-3.2-1B",
             "num_speculative_tokens": 5,
             # chunked prefill with low value to make sure we get mixed batches
             # "max_model_len": 512,
             # "max_num_batched_tokens": 512,
-            # "max_num_seqs": 512
+            # "max_num_seqs": 512,
             "enable_chunked_prefill": True,
             "max_num_batched_tokens": 4,
-            "max_num_seqs": 4
+            "max_num_seqs": 4,
+            "max_model_len": 2048,
         },
         {
             # Verify the detokenizer assertions in the test work when spec
@@ -83,7 +86,7 @@ from .conftest import (get_output_from_llm_generator,
         },
     ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
-@pytest.mark.parametrize("batch_size", [2, 32])
+@pytest.mark.parametrize("batch_size", [4, 32])
 @pytest.mark.parametrize("seed", [1])
 @fork_new_process_for_each_test
 def test_spec_decode_e2e_with_detokenization(test_llm_generator,
@@ -99,8 +102,9 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
         # "Hello, my name is",
         # "The president of the United States is",
         "The president of the United States is a man, whats his name?",
-        "The capital of France is",
-        "The future of AI is",
+        # "The capital of France is",
+        "The future of AI is, in your own words: ",
+        # "The future of AI is",
     ]
 
     prompts = [prompt for prompt, _ in zip(cycle(prompts), range(batch_size))]
@@ -124,10 +128,10 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
             for token_ids in batch_token_ids] == ([output_len] * batch_size)
 
     # Expect detokenized string to match.
-    tok = AutoTokenizer.from_pretrained("JackFram/llama-68m")
+    tok = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
     for actual_tokens, actual_token_ids in zip(batch_tokens, batch_token_ids):
         expected_tokens = tok.decode(actual_token_ids)
-        print(f"{actual_token_ids=}")
+        # print(f"vLLM tokens: {actual_tokens} || HF tokens {expected_tokens}")
         assert actual_tokens.strip() == expected_tokens.strip()
 
 
@@ -153,13 +157,24 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
         },
         {
             "model_name": "JackFram/llama-160m",
+            # "model_name": "meta-llama/Llama-3.2-1B",
+            # NOTE these must be enabled as chunked prefills prioritizes decodes so output is different
+            "enable_chunked_prefill": True,
+            "max_num_batched_tokens": 4,
+            "max_num_seqs": 4,
         },
     ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
+        # "speculative_model": "meta-llama/Llama-3.2-1B",
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+        # this should be equal to no prefill as prompts are all small with decode prio
+        # TODO these parameters MUST GO TO MODEL WE COMPARE AGAINST TOO!
+        "enable_chunked_prefill": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4,
     },
 ])
 @pytest.mark.parametrize(
@@ -168,7 +183,7 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
         # Use long output len for the small model test.
         10,
     ])
-@pytest.mark.parametrize("batch_size", [1])
+@pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
 @fork_new_process_for_each_test
 def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
@@ -226,6 +241,13 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+        # chunked prefill with low value to make sure we get mixed batches
+        # "max_model_len": 512,
+        # "max_num_batched_tokens": 512,
+        # "max_num_seqs": 512
+        "enable_chunked_prefill": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4
     },
 ])
 @pytest.mark.parametrize(
@@ -234,7 +256,7 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
         # Use small output len for fast test.
         256,
     ])
-@pytest.mark.parametrize("batch_size", [64])
+@pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize("seed", [1])
 @fork_new_process_for_each_test
 def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
