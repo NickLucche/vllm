@@ -484,23 +484,25 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             (seq_id, seq_data) for sg in \
             execute_model_req.seq_group_metadata_list \
             for seq_id, seq_data in sg.seq_data.items()
+            if sg.do_sample # ignore empty token sequences
         ]
-        # completion_seq_group_output_list: List[
-        #     CompletionSequenceGroupOutput] = []
+        completion_seq_group_output_list: List[
+            CompletionSequenceGroupOutput] = []
         # NOTE it may happen that a chunk has no output but the other element does (ie last chunk)
         # you have to make sure the chunk here is still aligned with its own empty output or you mess up the pairing
         output_index = 0 
-        sampler_outputs: List[SamplerOutput] = []
+        # sampler_outputs: List[SamplerOutput] = []
         # for index, ((seq_id, seq_data), needs_prompt_logprobs) in \
         #     enumerate(zip(seq_data_entries, seq_output_prompt_logprobs)):
+        # One single samplerout to avoid `create_output_by_sequence_group` later in postprocessing
         for seq_group_meta in execute_model_req.seq_group_metadata_list:
             # NOTE since we can get chunks here, we don't always have a sampled token (hence no output) 
             # to serialize (only on last chunk), but we have to keep it aligned IN A DIFFERENT SAMPLER OUTPUT
             if not seq_group_meta.do_sample:
                 # no token
-                # completion_seq_group_output_list.append(CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None))
+                completion_seq_group_output_list.append(CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None))
                 # need to return some output so token count can be updated
-                sampler_outputs.append(SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)]))
+                # sampler_outputs.append(SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)]))
             else:
                 # sequence with output
                 seq_id, seq_data = seq_data_entries[output_index]
@@ -521,9 +523,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     ]
                 else:
                     prompt_logprobs = None
-
-                # completion_seq_group_output_list.append(
-                sampler_outputs.append(SamplerOutput(outputs=[
+                if str(seq_id) != str(seq_group_meta.request_id):
+                    print(f"[{output_index}] MISMATCH IN REQ ID NO SPEC OUT", seq_data_entries, seq_group_meta)
+                    print("SG DATA", seq_group_meta.seq_data)
+                # sampler_outputs.append(SamplerOutput(outputs=[
+                completion_seq_group_output_list.append(
                     create_sequence_group_output(
                         token_id=sampled_token_ids_list[output_index][0],
                         token_id_logprob_rank=-1,
@@ -531,10 +535,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                         seq_id=seq_id,
                         topk_token_ids=[],
                         topk_logprobs=[],
-                        prompt_logprobs=prompt_logprobs)]))
+                        prompt_logprobs=prompt_logprobs))
                 output_index += 1
 
-        return sampler_outputs
+        return [SamplerOutput(outputs=completion_seq_group_output_list)]
 
     @nvtx_range("spec_decode_worker._run_no_spec")
     def _run_no_spec(self, execute_model_req: ExecuteModelRequest,
