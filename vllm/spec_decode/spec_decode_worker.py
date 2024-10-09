@@ -493,7 +493,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
     def _serialize_sampler_output_no_logprobs(
             self, execute_model_req: ExecuteModelRequest,
-            sampler_output: SamplerOutput) -> SamplerOutput:
+            sampler_output: SamplerOutput) -> List[SamplerOutput]:
         """
         Creates and returns a `SamplerOutput` with only the token IDs being
         serialized to CPU and populated in `CompletionSequenceGroupOutput`.
@@ -528,19 +528,22 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             execute_model_req.seq_group_metadata_list \
             for seq_id, seq_data in sg.seq_data.items()
         ]
-        completion_seq_group_output_list: List[
-            CompletionSequenceGroupOutput] = []
-        # NOTE it may happen that a chunk has no output but the other element does (ie last chunk or decode)
+        # completion_seq_group_output_list: List[
+        #     CompletionSequenceGroupOutput] = []
+        # NOTE it may happen that a chunk has no output but the other element does (ie last chunk)
         # you have to make sure the chunk here is still aligned with its own empty output or you mess up the pairing
         output_index = 0 
+        sampler_outputs: List[SamplerOutput] = []
         # for index, ((seq_id, seq_data), needs_prompt_logprobs) in \
         #     enumerate(zip(seq_data_entries, seq_output_prompt_logprobs)):
         for seq_group_meta in execute_model_req.seq_group_metadata_list:
             # NOTE since we can get chunks here, we don't always have a sampled token (hence no output) 
-            # to serialize (only on last chunk), but we have to keep it aligned
+            # to serialize (only on last chunk), but we have to keep it aligned IN A DIFFERENT SAMPLER OUTPUT
             if not seq_group_meta.do_sample:
                 # no token
-                completion_seq_group_output_list.append(CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None))
+                # completion_seq_group_output_list.append(CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None))
+                # need to return some output so token count can be updated
+                sampler_outputs.append(SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)]))
             else:
                 # sequence with output
                 seq_id, seq_data = seq_data_entries[output_index]
@@ -562,7 +565,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 else:
                     prompt_logprobs = None
 
-                completion_seq_group_output_list.append(
+                # completion_seq_group_output_list.append(
+                sampler_outputs.append(SamplerOutput(outputs=[
                     create_sequence_group_output(
                         token_id=sampled_token_ids_list[output_index][0],
                         token_id_logprob_rank=-1,
@@ -570,9 +574,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                         seq_id=seq_id,
                         topk_token_ids=[],
                         topk_logprobs=[],
-                        prompt_logprobs=prompt_logprobs))
+                        prompt_logprobs=prompt_logprobs)]))
                 output_index += 1
-        return SamplerOutput(outputs=completion_seq_group_output_list)
+
+        return sampler_outputs
 
     @nvtx_range("spec_decode_worker._run_no_spec")
     def _run_no_spec(self, execute_model_req: ExecuteModelRequest,
@@ -620,7 +625,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
             execute_model_req=execute_model_req, sampler_output=sampler_output)
                                     if self._disable_logprobs else
-                                    sampler_output)
+                                    [sampler_output])
 
         # Clear device tensors from sampler output. This reduces communication
         # overhead when the engine runs in a different process than the workers.
@@ -628,7 +633,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         sampler_output.sampled_token_ids = None
         sampler_output.logprobs = None
         print("NO_SPEC SAMPLER OUTPUT", sampler_output_to_return)
-        return [sampler_output_to_return]
+        return sampler_output_to_return
 
     def _run_non_driver_rank(self) -> bool:
         """Run proposer and verifier model in non-driver workers. This is used
