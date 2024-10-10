@@ -229,8 +229,9 @@ def run_equality_correctness_test(
                 assert acceptance_rate >= expected_acceptance_rate - 1e-2
 
     # Only pass token entries, not the logprobs
-    print("Outputs", [out[0:2] for out in org_outputs])
-    print("Outputs", [out[0:2] for out in sd_outputs])
+    print("PROMPTS", prompts)
+    print("Outputs spec", [out[0:2] for out in sd_outputs])
+    print("Outputs vanilla", [out[0:2] for out in org_outputs])
     check_outputs_equal(outputs_0_lst=[out[0:2] for out in org_outputs],
                         outputs_1_lst=[out[0:2] for out in sd_outputs],
                         name_0="org",
