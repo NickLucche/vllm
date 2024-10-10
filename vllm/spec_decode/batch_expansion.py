@@ -78,7 +78,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         print("SCORING ON THE UNION OF REQUESTS (includes expanded batch), is prompt?", [t.is_prompt for t in target_seq_group_metadata_list])
         print("SCORING ON THE UNION OF REQUESTS (includes expanded batch), do_sample?", [t.do_sample for t in target_seq_group_metadata_list])
         if non_spec_indices:
-            # TODO check prompts to know if chunk order is right, do the same with regular workflow in worker!!
             print("MIXEEED BATCH BOYS!")
             from transformers import AutoTokenizer
             tok = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
@@ -151,7 +150,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
         num_scoring_tokens = len(target_seq_group_metadata_list)
         # batch speculative and non-speculative (eg chunked prefill) requests
-        # TODO sure you dont have to order this as prefill | decode ? 
         # target_seq_group_metadata_list.extend(non_spec_seqs)
         non_spec_seqs.extend(target_seq_group_metadata_list)
 
@@ -171,6 +169,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         contracted_bs is the original batch size, and the batch size that the
         target_sampler_output will be contracted to.
         """
+        # non_spec_target_token_ids IS inverted!
         (target_token_ids, target_probs, target_logprobs, target_hidden_states,
          non_spec_target_token_ids, non_spec_target_probs,
          non_spec_target_logprobs,
@@ -416,25 +415,25 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         #
         # First samples are from speculative scoring, latter samples are non-
         # speculative samples.
-        split_sizes = (num_scoring_tokens,
-                       sampler_output.sampled_token_ids.numel() -
-                       num_scoring_tokens)
-        (spec_probs, non_spec_probs
+        # should be opposite PREFILL | DECODE
+        split_sizes = (sampler_output.sampled_token_ids.numel() -
+                       num_scoring_tokens, num_scoring_tokens)
+        (non_spec_probs, spec_probs
          ) = sampler_output.sampled_token_probs.split(split_sizes)
-        (spec_sampled_tokens, non_spec_sampled_tokens
+        (non_spec_sampled_tokens, spec_sampled_tokens
          ) = sampler_output.sampled_token_ids.flatten().split(split_sizes)
         (
-            spec_logprobs,
             non_spec_logprobs,
+            spec_logprobs
         ) = sampler_output.logprobs.split(split_sizes)
 
         if sampler_output.hidden_states is not None:
             (
-                spec_hidden_states,
                 non_spec_hidden_states,
+                spec_hidden_states
             ) = sampler_output.hidden_states.split(split_sizes)
         else:
-            spec_hidden_states, non_spec_hidden_states = None, None
+            non_spec_hidden_states, spec_hidden_states = None, None
 
         return (spec_sampled_tokens, spec_probs, spec_logprobs,
                 spec_hidden_states, non_spec_sampled_tokens, non_spec_probs,
