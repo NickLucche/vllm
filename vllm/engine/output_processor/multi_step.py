@@ -100,7 +100,8 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         seq_id = seq.seq_id
         # you can have decode and prefill here
         # assert all(
-        #     [seq_id == output.samples[0].parent_seq_id for output in outputs])
+        #     [seq_id == output.samples[0].parent_seq_id for output in outputs]), \
+        # f"SHOULD NOT HAPPEN {[output.samples[0].parent_seq_id for output in outputs]},{seq_id}"
 
         if is_async:
             # Async case: We process tokens one by one. Here, we know the token
