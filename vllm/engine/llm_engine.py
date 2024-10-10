@@ -1106,7 +1106,7 @@ class LLMEngine:
 
             if self.scheduler_config.is_multi_step and not is_async and seq_group_meta.is_prompt:
                 # TODO issue is that we enter here casue we have a prompt but then
-                # the assertion expects we are in multistep
+                # the assertion expects we are in multistep, refactor below elif
                 # Updates for all decodes happen when we actually append the
                 # token ids to the seq in process_outputs.
                 print("update_prefill_num_computed_tokens in LLM process output")
@@ -1117,8 +1117,6 @@ class LLMEngine:
             elif not is_async and seq_group_meta.is_prompt:
                 # update num of computed tokens here to have scheduler move on
                 print("Updating computed tokens manually")
-                print("META DO_SAMPLE", seq_group_meta.do_sample)
-                print("OUT", output, "\n\n\n")
                 seq_group.update_num_computed_tokens(seq_group_meta.token_chunk_size)
 
             if outputs:
@@ -1141,22 +1139,25 @@ class LLMEngine:
             if self.model_config.embedding_mode:
                 self._process_sequence_group_outputs(seq_group, output)
             else:
-                print("SEQ GROUP SHOULD SAMPLE HERE", seq_group_meta.do_sample)
-                print(seq_group)
-                if not len(output) or not len(output[0].samples):
-                    # do_sample must be false here
-                    # chunk and a prefill, the prefill must have its output processed
-                    print("Request with empty output! Likely a chunk that DID NOT go through the run_spec_decode branch")
-                else:
-                    # spec_decode_rout, len(output) here should be K+1
-                    if str(seq_group.request_id) != str(output[0].samples[0].parent_seq_id):
-                        print("THIS SHOULD NOT HAPPEN")
-                    elif (not len(output) or not len(output[0].samples)) and seq_group_meta.do_sample:
-                        print("THIS SHOULD ALSO NOT HAPPEN")
-                    self.output_processor.process_prompt_logprob(seq_group, output)
-                    if seq_group_meta.do_sample:
-                        self.output_processor.process_outputs(
-                            seq_group, output, is_async)
+                # TODO double check this is ok
+                # if not len(output) or not len(output[0].samples):
+                #     # do_sample must be false here
+                #     # chunk and a prefill, the prefill must have its output processed
+                #     print("Request with empty output! Likely a chunk that DID NOT go through the run_spec_decode branch")
+                # else:
+                #     # spec_decode_rout, len(output) here should be K+1
+                #     if str(seq_group.request_id) != str(output[0].samples[0].parent_seq_id):
+                #         print("THIS SHOULD NOT HAPPEN")
+                #     elif (not len(output) or not len(output[0].samples)) and seq_group_meta.do_sample:
+                #         print("THIS SHOULD ALSO NOT HAPPEN")
+                #     self.output_processor.process_prompt_logprob(seq_group, output)
+                #     if seq_group_meta.do_sample:
+                #         self.output_processor.process_outputs(
+                #             seq_group, output, is_async)
+                self.output_processor.process_prompt_logprob(seq_group, output)
+                if seq_group_meta.do_sample:
+                    self.output_processor.process_outputs(
+                        seq_group, output, is_async)
 
             if seq_group.is_finished():
                 finished_now.append(i)
