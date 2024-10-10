@@ -69,9 +69,6 @@ def get_output_from_llm_generator(
         maybe_assert_ngram_worker(llm)
 
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
-        print("LLM GENERATE output:")
-        for p, t in [(o.prompt, [t.text for t in o.outputs]) for o in outputs]:
-            print(p, "=>", t)
 
         token_ids = [output.outputs[0].token_ids for output in outputs]
         tokens = [output.outputs[0].text for output in outputs]
