@@ -343,7 +343,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     ) -> List[SamplerOutput]:
         """Perform speculative decoding on the input batch.
         """
-        # temporarily disable for debug
         if self.rank != self._driver_rank:
             self._run_non_driver_rank()
             return []
@@ -361,14 +360,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         disable_all_speculation = self._should_disable_all_speculation(
             execute_model_req)
         num_lookahead_slots = execute_model_req.num_lookahead_slots
-        # Make sure prefill requests have spec turned off, scheduler just sets the request
-        # to the global value lookeahead value
-        # TODO you can either do this or handle the case in which sg.num_speculative_tokens is None and sg.is_prompt (default one)
-        # and still you end up with same results
-        # for sg in execute_model_req.seq_group_metadata_list:
-        #     if sg.is_prompt:
-        #         sg.num_speculative_tokens = 0
-        # K can be None global one is used
         print("PROMPTS (is prompt, K, token_chunk, do_sample): ", [(sg.is_prompt, sg.num_speculative_tokens, sg.token_chunk_size, sg.do_sample) for sg in execute_model_req.seq_group_metadata_list])
         
         # Speculative decoding is disabled in the following cases:
@@ -380,12 +371,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         #    none of the requests in the batch have spec decoding enabled.
         # In any of these cases, the proposer and scorer workers
         # are called normally.
-        # TODO for some reason you can end up speculating even when you get all prompts when chunk is ON
-        # with big chunk size it should be virtually equal to the other BUT decode prioritized
-        no_spec = all((sg.is_prompt for sg in execute_model_req.seq_group_metadata_list))
-        # no_spec = num_lookahead_slots == 0 or disable_all_speculation or all(
-        #     sgm.num_speculative_tokens == 0
-        #     for sgm in execute_model_req.seq_group_metadata_list)
+        # We expect `num_speculative_tokens` to be None for prefills, check is_prompt first
+        no_spec = all(sgm.is_prompt for sgm in execute_model_req.seq_group_metadata_list) or num_lookahead_slots == 0 or disable_all_speculation or all(sgm.num_speculative_tokens == 0 for sgm in execute_model_req.seq_group_metadata_list)
 
         # Broadcast how many lookahead slots are scheduled for this step, and
         # whether all speculation is disabled, to all non-driver workers.
@@ -414,7 +401,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             disable_all_speculation, execute_model_req.seq_group_metadata_list)
 
         if no_spec:
-            print("NO SPEC")
             return self._run_no_spec(execute_model_req,
                                      skip_proposer=disable_all_speculation)
         return self._run_speculative_decoding_step(execute_model_req,
@@ -639,26 +625,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         This invokes the proposer worker to get k speculative tokens for each
         sequence, then scores each speculative token using the scoring worker.
 
+        When `enable_chunked_prefill` is set, scorer will batch decodes and 
+        prefills, while proposer will sync its KV-cache by running an extra
+        forward on prefills.
+
         Returns a list of SamplerOutput, each containing a single token per
         sequence.
         """
-        # NOTE sort by prompt first, inplace so other steps use same order and model-runner gets prefill|decode
-        prefill, decode, og_permutation = [], [], [-1]*len(execute_model_req.seq_group_metadata_list)
-        for i, sg in enumerate(execute_model_req.seq_group_metadata_list):
-            if sg.is_prompt:
-                prefill.append(sg)
-                og_permutation[i] = len(prefill)-1 
-            else:
-                decode.append(sg)
-        decode_counter = 0
-        for i in range(len(og_permutation)):
-            if og_permutation[i] == -1:
-                # decode request position
-                og_permutation[i] = decode_counter + len(prefill) 
-                decode_counter += 1
-        prefill.extend(decode)
-        og_model_req = execute_model_req
-        execute_model_req = execute_model_req.clone(prefill)
+        # With prefill chunking, expect prompts first so that backend gets prefill|decode.
         assert num_lookahead_slots == execute_model_req.num_lookahead_slots
 
         # Pass last hidden states from target model to proposer
@@ -703,7 +677,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 print("HIDDEN STATES SCORER", non_spec_indices, all_hidden_states.shape)
                 print("HIDDEN STATE DIFFERENCE??", target_sampler_output.prefill_hidden_states, "\n",prefill_hidden_states,"\n\n\n")
                 execute_model_req.previous_hidden_states = prepare_prefill_hidden_states(prefill_hidden_states)
-            # sync kv cache
+            # Sync proposer KV cache
             prefill_req = execute_model_req.clone(prefill_seqs)
             self.proposer_worker.execute_model(prefill_req)
 
@@ -711,14 +685,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             accepted_token_ids, target_logprobs = self._verify_tokens(
                 execute_model_req.seq_group_metadata_list, proposal_scores,
                 proposals, execute_model_req.num_lookahead_slots)
-
-        if og_permutation != list(range(len(og_permutation))):
-            print("REORDERING", og_permutation)
-            print('tokens', accepted_token_ids, accepted_token_ids[og_permutation])
-        # restore original requests order
-        execute_model_req = og_model_req
-        accepted_token_ids = accepted_token_ids[og_permutation]
-        target_logprobs = target_logprobs[og_permutation]
 
         stage_times = (proposal_timer.elapsed_time_ms / num_lookahead_slots,
                        scoring_timer.elapsed_time_ms,
@@ -757,8 +723,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         # Get probabilities of target model, including bonus tokens.
         proposal_verifier_probs = proposal_scores.probs[spec_indices]
-
-        print("Proposal len X do_sample X is_prompt", list(zip(proposal_lens_list,[(sg.do_sample,sg.is_prompt) for sg in seq_group_metadata_list])))
 
         # Get non-speculative sampled tokens from target model.
         non_spec_token_ids = proposal_scores.token_ids[non_spec_indices]
@@ -815,7 +779,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             self.previous_hidden_states = HiddenStates(
                 hidden_states, seq_group_metadata_list,
                 second_last_token_hidden_states)
-        print("VERIFY STEP ENDED", accepted_token_ids)
         return accepted_token_ids, logprobs
 
     def _create_output_sampler_list(
@@ -831,17 +794,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         The output is padded with -1 tokens such that each sequence has
         the same number of outputs.
         """
-        # TODO can be skipped earlier OR we can use do_sample here!
-        # remove chunked prefill output which may end up here as rows with just -1s
-        # rows, _ = torch.where(accepted_token_ids>=0) 
-        # lets pop the sequencegroup as it was never there
-        # if len(rows.unique()) < accepted_token_ids.shape[0]:
-            # seq_group_metadata_list = [sg for sg in seq_group_metadata_list if not sg.is_prompt]
-            # TODO this is not modified and returned, the input one is used
-            # seq_group_metadata_list = [sg for sg in seq_group_metadata_list if sg.do_sample]
-        # all rows where at least one element is not -1
-        # accepted_token_ids = accepted_token_ids[rows.unique()]
-
         batch_size, num_steps = accepted_token_ids.shape
         accepted_token_ids_by_step = accepted_token_ids.transpose(0, 1)
         if self._disable_logprobs:
@@ -876,9 +828,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         accepted_token_ids_by_step = accepted_token_ids_by_step.tolist()
 
         # Construct the output on a per-step, per-sequence basis.
+        # Non-terminal prefill chunks will end up here as rows with just -1s
+        # i.e mixed-batch [[-1, 1576], [-1, 29884], [-1, -1], [-1, -1]]
         sampler_output_list: List[SamplerOutput] = []
         for step_index in range(num_steps):
-            # can be made faster [[-1, 1576], [-1, 29884], [-1, -1], [-1, -1], [-1, -1], [-1, -1]]
             if all(token_id == -1
                    for token_id in accepted_token_ids_by_step[step_index]):
                 break
@@ -919,7 +872,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             # This is periodic because the rejection sampler emits metrics
             # periodically.
             self._maybe_log_stage_times(*stage_times)
-        print(f"SAMPLER OUTPUT LIST {len(sampler_output_list)}x{len(sampler_output_list[0].outputs)}")
         return sampler_output_list
 
     def _maybe_log_stage_times(self, average_time_per_proposal_tok_ms: float,
