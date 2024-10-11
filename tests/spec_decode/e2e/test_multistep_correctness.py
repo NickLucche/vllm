@@ -595,6 +595,15 @@ def test_spec_decode_different_block_size(vllm_runner, common_llm_kwargs,
             # Artificially limit the draft model max model len; this forces vLLM
             # to skip speculation once the sequences grow beyond 32-k tokens.
             "speculative_max_model_len": 32,
+            "enable_chunked_prefill": False,
+        },
+        {
+            "speculative_model": "JackFram/llama-68m",
+            "num_speculative_tokens": 5,
+            "enable_chunked_prefill": True,
+            "max_num_batched_tokens": 4,
+            "max_num_seqs": 4,
+            "speculative_max_model_len": 32,
         },
     ])
 @pytest.mark.parametrize("batch_size", [8])
