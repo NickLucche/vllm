@@ -560,6 +560,7 @@ def fork_new_process_for_each_test(
 
     return wrapper
 
+
 def large_gpu_test(*, min_gb: int):
     """
     Decorate a test to be skipped if no GPU is available or it does not have
@@ -588,6 +589,7 @@ def large_gpu_test(*, min_gb: int):
         return test_skipif(fork_new_process_for_each_test(f))
 
     return wrapper
+
 
 def multi_gpu_test(*, num_gpus: int):
     """

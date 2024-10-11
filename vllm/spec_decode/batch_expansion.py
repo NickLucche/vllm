@@ -74,7 +74,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
              proposal_token_ids_list=proposal_token_ids_list_without_skips,
              proposal_lens_list=proposal_lens_list,
          )
-            
+
         target_sampler_output = self._scorer_worker.execute_model(
             execute_model_req=execute_model_req.clone(
                 seq_group_metadata_list=target_seq_group_metadata_list))
@@ -136,17 +136,18 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         )
 
         num_scoring_tokens = len(target_seq_group_metadata_list)
-        # batch speculative and non-speculative (eg chunked prefill) requests
-        # target_seq_group_metadata_list.extend(non_spec_seqs)
+        # Batch speculative and non-speculative (eg chunked prefill) requests
+        # but make sure order is prefill|decode due to attention backend requirement
         non_spec_seqs.extend(target_seq_group_metadata_list)
 
         return (spec_indices, non_spec_indices, non_spec_seqs,
                 num_scoring_tokens)
 
     def _contract_batch(
-        self, contracted_seq_group_metadata_list: List[SequenceGroupMetadata], target_sampler_output: SamplerOutput,
-        proposals: SpeculativeProposals, num_scoring_tokens: int,
-        non_spec_indices: List[int], spec_indices: List[int], k: int
+        self, contracted_seq_group_metadata_list: List[SequenceGroupMetadata],
+        target_sampler_output: SamplerOutput, proposals: SpeculativeProposals,
+        num_scoring_tokens: int, non_spec_indices: List[int],
+        spec_indices: List[int], k: int
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
                Optional[torch.Tensor]]:
         """Contract the expanded batch back into its original size.
@@ -156,8 +157,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         contracted_bs is the original batch size, and the batch size that the
         target_sampler_output will be contracted to.
         """
-        contracted_bs=len(contracted_seq_group_metadata_list)
-        # non_spec_target_token_ids IS inverted!
+        contracted_bs = len(contracted_seq_group_metadata_list)
         (target_token_ids, target_probs, target_logprobs, target_hidden_states,
          non_spec_target_token_ids, non_spec_target_probs,
          non_spec_target_logprobs,
@@ -170,7 +170,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
         # The number of tokens in the expanded batch used for speculation is
         # equal to the total expanded batch size minus the number of samples for
-        # non-speculative sequences, prefill chunks with no out tokens included 
+        # non-speculative sequences, prefill chunks with no out tokens included
         non_spec_expanded_bs = len(non_spec_indices)
         spec_expanded_bs = expanded_batch_size - non_spec_expanded_bs
 
@@ -196,15 +196,15 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             all_hidden_states = None
 
         # TODO fix with `return_hidden_states=True` where hidden states are full size,
-        # and we'll need all indices prior to selecting `do_sample=True`, 
+        # and we'll need all indices prior to selecting `do_sample=True`,
         # while logits are indexed by `selected_token_indices` True
 
         # Rule out prefills that are in `non_spec_indices` but produce no tokens.
-        non_spec_indices = [idx for idx in non_spec_indices if contracted_seq_group_metadata_list[idx].do_sample]
+        non_spec_indices = [
+            idx for idx in non_spec_indices
+            if contracted_seq_group_metadata_list[idx].do_sample
+        ]
         if len(non_spec_target_token_ids):
-            print("FINAL CHUNK WITH do_sample=True here in contract batch", non_spec_target_token_ids, non_spec_target_token_ids.shape)
-            # all_tokens[non_spec_indices]
-            # tensor([[13, -1, -1, -1, -1, -1]], device='cuda:0')
             all_tokens[non_spec_indices, :1] = \
                 non_spec_target_token_ids.unsqueeze(1)
             all_probs[non_spec_indices, :1, :] = \
@@ -405,20 +405,16 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         # should be opposite PREFILL | DECODE
         split_sizes = (sampler_output.sampled_token_ids.numel() -
                        num_scoring_tokens, num_scoring_tokens)
-        (non_spec_probs, spec_probs
-         ) = sampler_output.sampled_token_probs.split(split_sizes)
+        (non_spec_probs,
+         spec_probs) = sampler_output.sampled_token_probs.split(split_sizes)
         (non_spec_sampled_tokens, spec_sampled_tokens
          ) = sampler_output.sampled_token_ids.flatten().split(split_sizes)
-        (
-            non_spec_logprobs,
-            spec_logprobs
-        ) = sampler_output.logprobs.split(split_sizes)
+        (non_spec_logprobs,
+         spec_logprobs) = sampler_output.logprobs.split(split_sizes)
 
         if sampler_output.hidden_states is not None:
-            (
-                non_spec_hidden_states,
-                spec_hidden_states
-            ) = sampler_output.hidden_states.split(split_sizes)
+            (non_spec_hidden_states, spec_hidden_states
+             ) = sampler_output.hidden_states.split(split_sizes)
         else:
             non_spec_hidden_states, spec_hidden_states = None, None
 

@@ -1,0 +1,221 @@
+============================= test session starts ==============================
+platform linux -- Python 3.10.12, pytest-8.3.3, pluggy-1.5.0
+rootdir: /home/ubuntu/vllm
+configfile: pyproject.toml
+plugins: anyio-4.4.0
+collected 1 item
+
+tests/spec_decode/e2e/test_multistep_correctness.py Fork a new process to run a test 0
+PROMPTS ['The president of the United States is a man, whats his name?', 'The future of AI is, in your own words: ', 'The president of the United States is a man, whats his name?', 'The future of AI is, in your own words: ']
+INFO 10-04 10:27:58 config.py:1660] Downcasting torch.float32 to torch.float16.
+INFO 10-04 10:27:58 config.py:1017] Chunked prefill is enabled with max_num_batched_tokens=4.
+WARNING 10-04 10:27:58 config.py:389] To see benefits of async output processing, enable CUDA graph. Since, enforce-eager is enabled, async output processor cannot be used
+INFO 10-04 10:27:58 llm_engine.py:237] Initializing an LLM engine (v0.6.3.dev60+g35bd2151.d20241001) with config: model='JackFram/llama-68m', speculative_config=None, tokenizer='JackFram/llama-68m', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config=None, rope_scaling=None, rope_theta=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.float16, max_seq_len=4, download_dir=None, load_format=LoadFormat.AUTO, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, kv_cache_dtype=auto, quantization_param_path=None, device_config=cuda, decoding_config=DecodingConfig(guided_decoding_backend='outlines'), observability_config=ObservabilityConfig(otlp_traces_endpoint=None, collect_model_forward_time=False, collect_model_execute_time=False), seed=0, served_model_name=JackFram/llama-68m, use_v2_block_manager=True, num_scheduler_steps=1, chunked_prefill_enabled=True multi_step_stream_outputs=False, enable_prefix_caching=False, use_async_output_proc=False, use_cached_outputs=False, mm_processor_kwargs=None)
+INFO 10-04 10:27:59 model_runner.py:1022] Starting to load model JackFram/llama-68m...
+INFO 10-04 10:27:59 weight_utils.py:242] Using model weights format ['*.bin']
+INFO 10-04 10:28:00 model_runner.py:1033] Loading model weights took 0.1270 GB
+INFO 10-04 10:28:00 gpu_executor.py:122] # GPU blocks: 213680, # CPU blocks: 43690
+LLM STep outputs [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+LLM process output indices range(0, 1)
+OUTPUTS PER SEQ GROUP (ONE IS PROMPT THE OTHER NOT) [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+output has multiples False 1
+Updating computed tokens manually
+META DO_SAMPLE False
+OUT [CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)] 
+
+
+
+SEQ GROUP DIO CANE SHOULD SAMPLE HERE False
+SequenceGroup(request_id=0, sampling_params=SamplingParams(n=1, best_of=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=0.0, top_p=1.0, top_k=-1, min_p=0.0, seed=None, use_beam_search=False, length_penalty=1.0, early_stopping=False, stop=[], stop_token_ids=[], include_stop_str_in_output=False, ignore_eos=True, max_tokens=32, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None), guided_decoding=None, num_seqs=1)
+LLM STep outputs [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+LLM process output indices range(0, 1)
+OUTPUTS PER SEQ GROUP (ONE IS PROMPT THE OTHER NOT) [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+output has multiples False 1
+Updating computed tokens manually
+META DO_SAMPLE False
+OUT [CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)] 
+
+
+
+SEQ GROUP DIO CANE SHOULD SAMPLE HERE False
+SequenceGroup(request_id=0, sampling_params=SamplingParams(n=1, best_of=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=0.0, top_p=1.0, top_k=-1, min_p=0.0, seed=None, use_beam_search=False, length_penalty=1.0, early_stopping=False, stop=[], stop_token_ids=[], include_stop_str_in_output=False, ignore_eos=True, max_tokens=32, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None), guided_decoding=None, num_seqs=1)
+LLM STep outputs [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+LLM process output indices range(0, 1)
+OUTPUTS PER SEQ GROUP (ONE IS PROMPT THE OTHER NOT) [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+output has multiples False 1
+Updating computed tokens manually
+META DO_SAMPLE False
+OUT [CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)] 
+
+
+
+SEQ GROUP DIO CANE SHOULD SAMPLE HERE False
+SequenceGroup(request_id=0, sampling_params=SamplingParams(n=1, best_of=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=0.0, top_p=1.0, top_k=-1, min_p=0.0, seed=None, use_beam_search=False, length_penalty=1.0, early_stopping=False, stop=[], stop_token_ids=[], include_stop_str_in_output=False, ignore_eos=True, max_tokens=32, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None), guided_decoding=None, num_seqs=1)
+LLM STep outputs [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[SequenceOutput(parent_seq_id=0, output_token=13, logprobs={13: Logprob(logprob=inf, rank=None, decoded_token=None)})], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+LLM process output indices range(0, 1)
+OUTPUTS PER SEQ GROUP (ONE IS PROMPT THE OTHER NOT) [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[SequenceOutput(parent_seq_id=0, output_token=13, logprobs={13: Logprob(logprob=inf, rank=None, decoded_token=None)})], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+output has multiples False 1
+Updating computed tokens manually
+META DO_SAMPLE True
+OUT [CompletionSequenceGroupOutput(samples=[SequenceOutput(parent_seq_id=0, output_token=13, logprobs={13: Logprob(logprob=inf, rank=None, decoded_token=None)})], prompt_logprobs=None)] 
+
+
+
+SEQ GROUP DIO CANE SHOULD SAMPLE HERE True
+SequenceGroup(request_id=0, sampling_params=SamplingParams(n=1, best_of=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=0.0, top_p=1.0, top_k=-1, min_p=0.0, seed=None, use_beam_search=False, length_penalty=1.0, early_stopping=False, stop=[], stop_token_ids=[], include_stop_str_in_output=False, ignore_eos=True, max_tokens=32, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None), guided_decoding=None, num_seqs=1)
+LLM STep outputs [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+LLM process output indices range(0, 1)
+OUTPUTS PER SEQ GROUP (ONE IS PROMPT THE OTHER NOT) [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+output has multiples False 1
+Updating computed tokens manually
+META DO_SAMPLE False
+OUT [CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)] 
+
+
+
+SEQ GROUP DIO CANE SHOULD SAMPLE HERE False
+SequenceGroup(request_id=1, sampling_params=SamplingParams(n=1, best_of=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=0.0, top_p=1.0, top_k=-1, min_p=0.0, seed=None, use_beam_search=False, length_penalty=1.0, early_stopping=False, stop=[], stop_token_ids=[], include_stop_str_in_output=False, ignore_eos=True, max_tokens=32, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None), guided_decoding=None, num_seqs=1)
+LLM STep outputs [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+LLM process output indices range(0, 1)
+OUTPUTS PER SEQ GROUP (ONE IS PROMPT THE OTHER NOT) [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+output has multiples False 1
+Updating computed tokens manually
+META DO_SAMPLE False
+OUT [CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)] 
+
+
+
+SEQ GROUP DIO CANE SHOULD SAMPLE HERE False
+SequenceGroup(request_id=1, sampling_params=SamplingParams(n=1, best_of=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=0.0, top_p=1.0, top_k=-1, min_p=0.0, seed=None, use_beam_search=False, length_penalty=1.0, early_stopping=False, stop=[], stop_token_ids=[], include_stop_str_in_output=False, ignore_eos=True, max_tokens=32, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None), guided_decoding=None, num_seqs=1)
+LLM STep outputs [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+LLM process output indices range(0, 1)
+OUTPUTS PER SEQ GROUP (ONE IS PROMPT THE OTHER NOT) [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+output has multiples False 1
+Updating computed tokens manually
+META DO_SAMPLE False
+OUT [CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)] 
+
+
+
+SEQ GROUP DIO CANE SHOULD SAMPLE HERE False
+SequenceGroup(request_id=1, sampling_params=SamplingParams(n=1, best_of=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=0.0, top_p=1.0, top_k=-1, min_p=0.0, seed=None, use_beam_search=False, length_penalty=1.0, early_stopping=False, stop=[], stop_token_ids=[], include_stop_str_in_output=False, ignore_eos=True, max_tokens=32, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None), guided_decoding=None, num_seqs=1)
+LLM STep outputs [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None), CompletionSequenceGroupOutput(samples=[SequenceOutput(parent_seq_id=1, output_token=29896, logprobs={29896: Logprob(logprob=inf, rank=None, decoded_token=None)})], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+LLM process output indices range(0, 2)
+OUTPUTS PER SEQ GROUP (ONE IS PROMPT THE OTHER NOT) [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None), CompletionSequenceGroupOutput(samples=[SequenceOutput(parent_seq_id=1, output_token=29896, logprobs={29896: Logprob(logprob=inf, rank=None, decoded_token=None)})], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+output has multiples False 1
+Updating computed tokens manually
+META DO_SAMPLE False
+OUT [CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)] 
+
+
+
+SEQ GROUP DIO CANE SHOULD SAMPLE HERE False
+SequenceGroup(request_id=2, sampling_params=SamplingParams(n=1, best_of=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=0.0, top_p=1.0, top_k=-1, min_p=0.0, seed=None, use_beam_search=False, length_penalty=1.0, early_stopping=False, stop=[], stop_token_ids=[], include_stop_str_in_output=False, ignore_eos=True, max_tokens=32, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None), guided_decoding=None, num_seqs=1)
+output has multiples False 1
+Updating computed tokens manually
+META DO_SAMPLE True
+OUT [CompletionSequenceGroupOutput(samples=[SequenceOutput(parent_seq_id=1, output_token=29896, logprobs={29896: Logprob(logprob=inf, rank=None, decoded_token=None)})], prompt_logprobs=None)] 
+
+
+
+SEQ GROUP DIO CANE SHOULD SAMPLE HERE True
+SequenceGroup(request_id=1, sampling_params=SamplingParams(n=1, best_of=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=0.0, top_p=1.0, top_k=-1, min_p=0.0, seed=None, use_beam_search=False, length_penalty=1.0, early_stopping=False, stop=[], stop_token_ids=[], include_stop_str_in_output=False, ignore_eos=True, max_tokens=32, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None), guided_decoding=None, num_seqs=1)
+LLM STep outputs [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+LLM process output indices range(0, 1)
+OUTPUTS PER SEQ GROUP (ONE IS PROMPT THE OTHER NOT) [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+output has multiples False 1
+Updating computed tokens manually
+META DO_SAMPLE False
+OUT [CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)] 
+
+
+
+SEQ GROUP DIO CANE SHOULD SAMPLE HERE False
+SequenceGroup(request_id=2, sampling_params=SamplingParams(n=1, best_of=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=0.0, top_p=1.0, top_k=-1, min_p=0.0, seed=None, use_beam_search=False, length_penalty=1.0, early_stopping=False, stop=[], stop_token_ids=[], include_stop_str_in_output=False, ignore_eos=True, max_tokens=32, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None), guided_decoding=None, num_seqs=1)
+LLM STep outputs [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+LLM process output indices range(0, 1)
+OUTPUTS PER SEQ GROUP (ONE IS PROMPT THE OTHER NOT) [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+output has multiples False 1
+Updating computed tokens manually
+META DO_SAMPLE False
+OUT [CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)] 
+
+
+
+SEQ GROUP DIO CANE SHOULD SAMPLE HERE False
+SequenceGroup(request_id=2, sampling_params=SamplingParams(n=1, best_of=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=0.0, top_p=1.0, top_k=-1, min_p=0.0, seed=None, use_beam_search=False, length_penalty=1.0, early_stopping=False, stop=[], stop_token_ids=[], include_stop_str_in_output=False, ignore_eos=True, max_tokens=32, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None), guided_decoding=None, num_seqs=1)
+LLM STep outputs [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+LLM process output indices range(0, 1)
+OUTPUTS PER SEQ GROUP (ONE IS PROMPT THE OTHER NOT) [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+output has multiples False 1
+Updating computed tokens manually
+META DO_SAMPLE False
+OUT [CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)] 
+
+
+
+SEQ GROUP DIO CANE SHOULD SAMPLE HERE False
+SequenceGroup(request_id=2, sampling_params=SamplingParams(n=1, best_of=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=0.0, top_p=1.0, top_k=-1, min_p=0.0, seed=None, use_beam_search=False, length_penalty=1.0, early_stopping=False, stop=[], stop_token_ids=[], include_stop_str_in_output=False, ignore_eos=True, max_tokens=32, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None), guided_decoding=None, num_seqs=1)
+LLM STep outputs [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None), CompletionSequenceGroupOutput(samples=[SequenceOutput(parent_seq_id=2, output_token=13, logprobs={13: Logprob(logprob=inf, rank=None, decoded_token=None)})], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+LLM process output indices range(0, 2)
+OUTPUTS PER SEQ GROUP (ONE IS PROMPT THE OTHER NOT) [SamplerOutput(outputs=[CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None), CompletionSequenceGroupOutput(samples=[SequenceOutput(parent_seq_id=2, output_token=13, logprobs={13: Logprob(logprob=inf, rank=None, decoded_token=None)})], prompt_logprobs=None)], sampled_token_probs=None, sampled_token_ids=None, spec_decode_worker_metrics=None)]
+output has multiples False 1
+Updating computed tokens manually
+META DO_SAMPLE False
+OUT [CompletionSequenceGroupOutput(samples=[], prompt_logprobs=None)] 
+
+
+
+SEQ GROUP DIO CANE SHOULD SAMPLE HERE False
+SequenceGroup(request_id=3, sampling_params=SamplingParams(n=1, best_of=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=0.0, top_p=1.0, top_k=-1, min_p=0.0, seed=None, use_beam_search=False, length_penalty=1.0, early_stopping=False, stop=[], stop_token_ids=[], include_stop_str_in_output=False, ignore_eos=True, max_tokens=32, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None), guided_decoding=None, num_seqs=1)
+output has multiples False 1
+Updating computed tokens manually
+Fork a new process to run a test 5117
+F
+
+=================================== FAILURES ===================================
+_ test_spec_decode_e2e_with_detokenization[1-4-test_llm_kwargs0-per_test_common_llm_kwargs1-common_llm_kwargs0] _
+
+args = ()
+kwargs = {'batch_size': 4, 'test_llm_generator': <function test_llm_generator.<locals>.generate at 0x761c96bdd510>}
+Skipped = <class 'Skipped'>, pid = 5117, pgid = 5084, _pid = 5117
+_exitcode = 256, old_signal_handler = <Handlers.SIG_DFL: 0>
+
+    @functools.wraps(f)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
+        # Make the process the leader of its own process group
+        # to avoid sending SIGTERM to the parent process
+        os.setpgrp()
+        from _pytest.outcomes import Skipped
+        pid = os.fork()
+        print(f"Fork a new process to run a test {pid}")
+        if pid == 0:
+            try:
+                f(*args, **kwargs)
+            except Skipped as e:
+                # convert Skipped to exit code 0
+                print(str(e))
+                os._exit(0)
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                os._exit(1)
+            else:
+                os._exit(0)
+        else:
+            pgid = os.getpgid(pid)
+            _pid, _exitcode = os.waitpid(pid, 0)
+            # ignore SIGTERM signal itself
+            old_signal_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            # kill all child processes
+            os.killpg(pgid, signal.SIGTERM)
+            # restore the signal handler
+            signal.signal(signal.SIGTERM, old_signal_handler)
+>           assert _exitcode == 0, (f"function {f} failed when called with"
+                                    f" args {args} and kwargs {kwargs}")
+E           AssertionError: function <function test_spec_decode_e2e_with_detokenization at 0x761c96b032e0> failed when called with args () and kwargs {'test_llm_generator': <function test_llm_generator.<locals>.generate at 0x761c96bdd510>, 'batch_size': 4}
+
+tests/utils.py:452: AssertionError
+=========================== short test summary info ============================
+FAILED tests/spec_decode/e2e/test_multistep_correctness.py::test_spec_decode_e2e_with_detokenization[1-4-test_llm_kwargs0-per_test_common_llm_kwargs1-common_llm_kwargs0]
+============================== 1 failed in 11.34s ==============================

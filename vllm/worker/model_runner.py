@@ -1704,19 +1704,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if model_input.async_callback is not None:
             model_input.async_callback()
 
-        # TODO num sampling_metadata and output DOES NOT match (ie output discards prefills, here prefill is still there)
-        # Sample the next token.
-        if len(model_input.sampling_metadata.seq_groups) != logits.shape[0]:
-            # print("MISMATCH IN OUTPUT LEN AND SAMPLER META!")
-            # TODO this happens but does not affect output apparently, investigate 
-            # model_input.sampling_metadata.seq_groups = [sg for sg in model_input.sampling_metadata.seq_groups if sg.do_sample]
-            pass
         output: SamplerOutput = self.model.sample(
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
-        # can be empty when you just get chunk(s)
-        # assert len(output.sampled_token_ids) == logits.shape[0]
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time

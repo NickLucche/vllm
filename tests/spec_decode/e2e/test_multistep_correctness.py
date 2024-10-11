@@ -720,20 +720,14 @@ def test_disable_speculation(vllm_runner, common_llm_kwargs,
         }
         # Try a range of common k, as well as large speculation.
         for k in [1, 2, 3, 4, 5, 6, 7, 8, 9, 63]
-    ]+
-    [
-        {
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": k,
-            "enable_chunked_prefill": True,
-            "speculative_disable_mqa_scorer": True,
-            "max_num_batched_tokens": 4,
-            "max_num_seqs": 4,
-        }
-        for k in [1, 2, 3, 4, 5, 6, 7, 8, 9, 63]
-    ]
-    
-    )
+    ] + [{
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": k,
+        "enable_chunked_prefill": True,
+        "speculative_disable_mqa_scorer": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4,
+    } for k in [1, 2, 3, 4, 5, 6, 7, 8, 9, 63]])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize(
     "output_len",
@@ -784,21 +778,15 @@ def test_many_k(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         }
         # Try a range of common k.
         for k in [1, 2, 3]
-    ]
-    +
-    [
-        {
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": k,
-            "spec_decoding_acceptance_method": "typical_acceptance_sampler",
-            "enable_chunked_prefill": True,
-            "speculative_disable_mqa_scorer": True,
-            "max_num_batched_tokens": 4,
-            "max_num_seqs": 4
-        }
-        for k in [1, 2, 3]
-        ]
-    )
+    ] + [{
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": k,
+        "spec_decoding_acceptance_method": "typical_acceptance_sampler",
+        "enable_chunked_prefill": True,
+        "speculative_disable_mqa_scorer": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4
+    } for k in [1, 2, 3]])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize(
     "output_len",

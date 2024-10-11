@@ -59,7 +59,6 @@ class Top1Proposer(SpeculativeProposer):
             nonzero_proposal_len_indices,
         ) = self._split_by_proposal_len(seq_group_metadata_list, proposal_len)
 
-        
         if nonzero_proposal_len_seqs:
             # Speculate tokens using the draft worker for the speculative
             # sequences.
@@ -105,11 +104,10 @@ class Top1Proposer(SpeculativeProposer):
             sampler_transposed=transposed,
         )
 
-        return SpeculativeProposals(
-            proposal_token_ids=proposal_tokens,
-            proposal_probs=proposal_probs,
-            proposal_lens=proposal_lens,
-            no_proposals=maybe_sampler_output is None)
+        return SpeculativeProposals(proposal_token_ids=proposal_tokens,
+                                    proposal_probs=proposal_probs,
+                                    proposal_lens=proposal_lens,
+                                    no_proposals=maybe_sampler_output is None)
 
     def _split_by_proposal_len(
         self,
@@ -128,7 +126,9 @@ class Top1Proposer(SpeculativeProposer):
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             # The speculative decoding for this request has either been disabled
             # (e.g. due to high traffic)or this is a prompt request (`num_speculative_tokens` is None).
-            if (seq_group_metadata.is_prompt and seq_group_metadata.num_speculative_tokens is None) or seq_group_metadata.num_speculative_tokens == 0:
+            if (seq_group_metadata.is_prompt
+                    and seq_group_metadata.num_speculative_tokens is None
+                ) or seq_group_metadata.num_speculative_tokens == 0:
                 proposal_lens.append(0)
                 continue
 
