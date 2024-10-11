@@ -74,9 +74,9 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
              proposal_token_ids_list=proposal_token_ids_list_without_skips,
              proposal_lens_list=proposal_lens_list,
          )
-        
         print("SCORING ON THE UNION OF REQUESTS (includes expanded batch), is prompt?", [t.is_prompt for t in target_seq_group_metadata_list])
         print("SCORING ON THE UNION OF REQUESTS (includes expanded batch), do_sample?", [t.do_sample for t in target_seq_group_metadata_list])
+
         if non_spec_indices:
             print("MIXEEED BATCH BOYS!")
             from transformers import AutoTokenizer
@@ -103,7 +103,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         else:
             # Batch has a mix of spec decode enabled and disabled seq groups
             contracted = self._contract_batch(
-                contracted_bs=len(execute_model_req.seq_group_metadata_list),
+                execute_model_req.seq_group_metadata_list,
                 target_sampler_output=target_sampler_output,
                 proposals=proposals,
                 num_scoring_tokens=num_scoring_tokens,
@@ -157,7 +157,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 num_scoring_tokens)
 
     def _contract_batch(
-        self, contracted_bs: int, target_sampler_output: SamplerOutput,
+        self, contracted_seq_group_metadata_list: List[SequenceGroupMetadata], target_sampler_output: SamplerOutput,
         proposals: SpeculativeProposals, num_scoring_tokens: int,
         non_spec_indices: List[int], spec_indices: List[int], k: int
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
@@ -169,6 +169,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         contracted_bs is the original batch size, and the batch size that the
         target_sampler_output will be contracted to.
         """
+        contracted_bs=len(contracted_seq_group_metadata_list)
         # non_spec_target_token_ids IS inverted!
         (target_token_ids, target_probs, target_logprobs, target_hidden_states,
          non_spec_target_token_ids, non_spec_target_probs,
@@ -182,10 +183,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
         # The number of tokens in the expanded batch used for speculation is
         # equal to the total expanded batch size minus the number of samples for
-        # non-speculative sequences.
-        # non_spec_expanded_bs = len(non_spec_target_token_ids)
-        # predicted tokens may be empty when chunking  (do_sample=False for first chunks), but the batch still has non-spec elements 
-        non_spec_expanded_bs = max(len(non_spec_indices), len(non_spec_target_token_ids))
+        # non-speculative sequences, prefill chunks with no out tokens included 
+        non_spec_expanded_bs = len(non_spec_indices)
         spec_expanded_bs = expanded_batch_size - non_spec_expanded_bs
 
         target_token_ids = target_token_ids.reshape(spec_expanded_bs, k + 1)
@@ -209,8 +208,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         else:
             all_hidden_states = None
 
-        # rule out the chunk prefill case (first chunks do_sample=False), where you have non_spec_indices but no tokens
-        # if non_spec_indices:
+        # rule out prefill chunks with do_sample=False, where you have non_spec_indices but no produced tokens
+        non_spec_indices = [idx for idx in non_spec_indices if contracted_seq_group_metadata_list[idx].do_sample]
         if len(non_spec_target_token_ids):
             print("FINAL CHUNK WITH do_sample=True here in contract batch", non_spec_target_token_ids, non_spec_target_token_ids.shape)
             # all_tokens[non_spec_indices]

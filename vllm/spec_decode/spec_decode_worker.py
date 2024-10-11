@@ -387,9 +387,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """Perform speculative decoding on the input batch.
         """
         # temporarily disable for debug
-        # if self.rank != self._driver_rank:
-            # self._run_non_driver_rank()
-            # return []
+        if self.rank != self._driver_rank:
+            self._run_non_driver_rank()
+            return []
 
         if execute_model_req is None:
             # This signals that there's no more requests to process for now.
