@@ -641,7 +641,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         with Timer() as proposal_timer:
             # Generate proposals using draft worker.
-            proposals, prefill_seqs = self.proposer_worker.get_spec_proposals(
+            proposals = self.proposer_worker.get_spec_proposals(
                 execute_model_req, self._seq_with_bonus_token_in_last_step)
 
         if not self._allow_zero_draft_token_step and proposals.no_proposals:
@@ -652,33 +652,22 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         execute_model_req.previous_hidden_states = None
 
         with Timer() as scoring_timer:
-            proposal_scores, non_spec_indices, target_sampler_output = self.scorer.score_proposals(
+            proposal_scores = self.scorer.score_proposals(
                 execute_model_req,
                 proposals,
             )
-        
+
+        _, (non_spec_seqs, non_spec_indices) = split_batch_by_proposal_len(execute_model_req.seq_group_metadata_list, proposals.proposal_lens)
+        # When prefill chunking is enabled, `non_spec_seqs` also contains prefills.
+        # TODO skip this if chunking is not enabled
         if len(non_spec_indices):
-            print("NON SPEC INDICEEES", non_spec_indices)
             all_hidden_states = proposal_scores.hidden_states
+            # TODO fix `return_hidden_states`
             if all_hidden_states is not None:
-                # # remove hidden_states for prompt tokens
-                # if any(seq.is_prompt
-                #     for seq in execute_model_req.seq_group_metadata_list):
-                #     hidden_states = hidden_states[
-                #         torch.where(sampler_output.sampled_token_ids -
-                #                     VLLM_INVALID_TOKEN_ID)[0]]
-                # if self.previous_hidden_states is None:
-                #     self.previous_hidden_states = HiddenStates(
-                #         hidden_states, execute_model_req.seq_group_metadata_list)
-                # else:
-                #     self.previous_hidden_states.update(
-                #         hidden_states, execute_model_req.seq_group_metadata_list)
                 prefill_hidden_states = all_hidden_states[non_spec_indices]
-                print("HIDDEN STATES SCORER", non_spec_indices, all_hidden_states.shape)
-                print("HIDDEN STATE DIFFERENCE??", target_sampler_output.prefill_hidden_states, "\n",prefill_hidden_states,"\n\n\n")
                 execute_model_req.previous_hidden_states = prepare_prefill_hidden_states(prefill_hidden_states)
-            # Sync proposer KV cache
-            prefill_req = execute_model_req.clone(prefill_seqs)
+            # Sync proposer KV cache for prefills.
+            prefill_req = execute_model_req.clone(non_spec_seqs)
             self.proposer_worker.execute_model(prefill_req)
 
         with Timer() as verification_timer:
