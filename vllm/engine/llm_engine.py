@@ -1117,21 +1117,6 @@ class LLMEngine:
             if self.model_config.embedding_mode:
                 self._process_sequence_group_outputs(seq_group, output)
             else:
-                # TODO double check this is ok
-                # if not len(output) or not len(output[0].samples):
-                #     # do_sample must be false here
-                #     # chunk and a prefill, the prefill must have its output processed
-                #     print("Request with empty output! Likely a chunk that DID NOT go through the run_spec_decode branch")
-                # else:
-                #     # spec_decode_rout, len(output) here should be K+1
-                #     if str(seq_group.request_id) != str(output[0].samples[0].parent_seq_id):
-                #         print("THIS SHOULD NOT HAPPEN")
-                #     elif (not len(output) or not len(output[0].samples)) and seq_group_meta.do_sample:
-                #         print("THIS SHOULD ALSO NOT HAPPEN")
-                #     self.output_processor.process_prompt_logprob(seq_group, output)
-                #     if seq_group_meta.do_sample:
-                #         self.output_processor.process_outputs(
-                #             seq_group, output, is_async)
                 self.output_processor.process_prompt_logprob(seq_group, output)
                 if seq_group_meta.do_sample:
                     self.output_processor.process_outputs(
