@@ -55,11 +55,9 @@ class Top1Proposer(SpeculativeProposer):
         # Split speculative- and non-speculative- sequences.
         (
             proposal_lens,
-            prefill_seqs,
             nonzero_proposal_len_seqs,
             nonzero_proposal_len_indices,
         ) = self._split_by_proposal_len(seq_group_metadata_list, proposal_len)
-        assert len(prefill_seqs) + len(nonzero_proposal_len_indices) == len(seq_group_metadata_list)
 
         
         if nonzero_proposal_len_seqs:
@@ -106,14 +104,12 @@ class Top1Proposer(SpeculativeProposer):
             nonzero_proposal_len_indices=nonzero_proposal_len_indices,
             sampler_transposed=transposed,
         )
-        # TODO refactor this output
-        proposals = SpeculativeProposals(
+
+        return SpeculativeProposals(
             proposal_token_ids=proposal_tokens,
             proposal_probs=proposal_probs,
             proposal_lens=proposal_lens,
-            no_proposals=maybe_sampler_output is None), prefill_seqs
-
-        return proposals
+            no_proposals=maybe_sampler_output is None)
 
     def _split_by_proposal_len(
         self,
@@ -129,13 +125,11 @@ class Top1Proposer(SpeculativeProposer):
         proposal_lens: List[int] = []
         nonzero_proposal_len_seqs: List[SequenceGroupMetadata] = []
         nonzero_proposal_len_indices: List[int] = []
-        prefill_seqs: List[SequenceGroupMetadata] = []
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             # The speculative decoding for this request has either been disabled
             # (e.g. due to high traffic)or this is a prompt request (`num_speculative_tokens` is None).
             if (seq_group_metadata.is_prompt and seq_group_metadata.num_speculative_tokens is None) or seq_group_metadata.num_speculative_tokens == 0:
                 proposal_lens.append(0)
-                prefill_seqs.append(seq_group_metadata)
                 continue
 
             seq_data = next(iter(seq_group_metadata.seq_data.values()))
@@ -151,15 +145,11 @@ class Top1Proposer(SpeculativeProposer):
                 new_k = proposal_len
                 nonzero_proposal_len_seqs.append(seq_group_metadata)
                 nonzero_proposal_len_indices.append(i)
-            else:
-                # speculative budget exceeded 
-                prefill_seqs.append(seq_group_metadata)
             proposal_lens.append(new_k)
             seq_group_metadata.num_speculative_tokens = new_k
 
         return (
             proposal_lens,
-            prefill_seqs,
             nonzero_proposal_len_seqs,
             nonzero_proposal_len_indices,
         )

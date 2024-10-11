@@ -74,19 +74,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
              proposal_token_ids_list=proposal_token_ids_list_without_skips,
              proposal_lens_list=proposal_lens_list,
          )
-        print("SCORING ON THE UNION OF REQUESTS (includes expanded batch), is prompt?", [t.is_prompt for t in target_seq_group_metadata_list])
-        print("SCORING ON THE UNION OF REQUESTS (includes expanded batch), do_sample?", [t.do_sample for t in target_seq_group_metadata_list])
-
-        if non_spec_indices:
-            print("MIXEEED BATCH BOYS!")
-            from transformers import AutoTokenizer
-            tok = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B")
-            # for sg in execute_model_req.seq_group_metadata_list:
-            for sg in target_seq_group_metadata_list:
-                for k, v in sg.seq_data.items():
-                    # print(k, "PROMPT TOKENS TO STR", v.prompt_token_ids, "=>", tok.decode(v.prompt_token_ids))
-                    print(k, "GETTOKENS TOKENS TO STR", v.get_token_ids(), "=>", tok.decode(v.get_token_ids()))
-
             
         target_sampler_output = self._scorer_worker.execute_model(
             execute_model_req=execute_model_req.clone(
@@ -118,7 +105,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             token_ids=all_tokens,
             logprobs=spec_logprobs,
             hidden_states=all_hidden_states,
-        ), non_spec_indices, target_sampler_output
+        )
 
     def _expand_batch(
         self,
@@ -208,7 +195,11 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         else:
             all_hidden_states = None
 
-        # rule out prefill chunks with do_sample=False, where you have non_spec_indices but no produced tokens
+        # TODO fix with `return_hidden_states=True` where hidden states are full size,
+        # and we'll need all indices prior to selecting `do_sample=True`, 
+        # while logits are indexed by `selected_token_indices` True
+
+        # Rule out prefills that are in `non_spec_indices` but produce no tokens.
         non_spec_indices = [idx for idx in non_spec_indices if contracted_seq_group_metadata_list[idx].do_sample]
         if len(non_spec_target_token_ids):
             print("FINAL CHUNK WITH do_sample=True here in contract batch", non_spec_target_token_ids, non_spec_target_token_ids.shape)
@@ -312,9 +303,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         This function creates K+1 target SequenceGroupMetadata to take
         advantage of the bonus token.
         """
-        # assert not input_seq_group_metadata.is_prompt, (
-        #     "Speculating on "
-        #     "prompts not yet supported")
         assert len(input_seq_group_metadata.seq_data) == 1, (
             "Beam search "
             "not supported in speculative decoding")
