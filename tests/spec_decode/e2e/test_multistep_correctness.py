@@ -68,7 +68,8 @@ from .conftest import (get_output_from_llm_generator,
             "enable_chunked_prefill": False,
         },
         {
-            # chunked prefill enabled with small value to make sure we get mixed batches
+            # Chunked prefill enabled with small value
+            # to make sure we get mixed batches.
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
             "enable_chunked_prefill": True,

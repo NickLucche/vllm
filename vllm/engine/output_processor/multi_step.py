@@ -119,8 +119,8 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 if sample.output_token != VLLM_INVALID_TOKEN_ID
             ]
 
-            # Here we can have decode and prefill when both spec-decode and prefill
-            # chunking are enabled, we don't have guaranteed samples (all -1s).
+            # When both spec-decode and pre-fill chunking are enabled, we
+            # don't have guaranteed samples here (e.g. all -1s).
             if valid_samples:
                 self._process_seq_outputs(seq, valid_samples,
                                           sequence_group.sampling_params)

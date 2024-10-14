@@ -125,7 +125,7 @@ class Top1Proposer(SpeculativeProposer):
         nonzero_proposal_len_indices: List[int] = []
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             # The speculative decoding for this request has either been disabled
-            # (e.g. due to high traffic)or this is a prompt request (`num_speculative_tokens` is None).
+            # (e.g. due to high traffic) or this is a prompt request.
             if (seq_group_metadata.is_prompt
                     and seq_group_metadata.num_speculative_tokens is None
                 ) or seq_group_metadata.num_speculative_tokens == 0:

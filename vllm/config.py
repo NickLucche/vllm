@@ -1273,13 +1273,13 @@ class SpeculativeConfig:
                         "This speculative model supports a maximum of "
                         f"num_speculative_tokens={n_predict}, but "
                         f"{num_speculative_tokens=} was provided.")
-                        
+
             if enable_chunked_prefill and draft_hf_config.model_type in [
                     "medusa", "mlp_speculator", "eagle"
             ]:
                 raise ValueError(
-                    "Chunked prefill and hidden-state based draft models are not "
-                    "yet compatible.")
+                    "Chunked prefill and hidden-state based draft models are "
+                    "not yet compatible.")
 
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(

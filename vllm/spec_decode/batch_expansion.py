@@ -126,7 +126,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             split_batch_by_proposal_len(
                 seq_group_metadata_list, proposal_lens_list)
 
-        spec_expanded_seq_group_metadata_list = self._create_scoring_model_input(
+        spec_expanded_seqs = self._create_scoring_model_input(
             seq_group_metadata_list=spec_seqs,
             proposal_token_ids=proposal_token_ids_list,
             # NOTE: We determine the seq ids in the expanded batch using the
@@ -135,10 +135,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 seq_ids=get_all_seq_ids(seq_group_metadata_list)),
         )
 
-        num_scoring_tokens = len(spec_expanded_seq_group_metadata_list)
-        # Batch speculative and non-speculative (eg chunked prefill) requests
-        # but make sure order is prefill|decode due to attention backend requirement
-        target_seq_group_metadata_list = non_spec_seqs + spec_expanded_seq_group_metadata_list
+        num_scoring_tokens = len(spec_expanded_seqs)
+        # Batch speculative and non-speculative (e.g. chunked prefill) requests
+        # but make sure order is prefill|decode due to backend requirement.
+        target_seq_group_metadata_list = non_spec_seqs + spec_expanded_seqs
 
         return (spec_indices, non_spec_indices, target_seq_group_metadata_list,
                 num_scoring_tokens)
@@ -195,7 +195,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         else:
             all_hidden_states = None
 
-        # Rule out prefills that are in `non_spec_indices` but produce no tokens.
+        # Rule out prefills that produce no tokens.
         non_spec_indices = [
             idx for idx in non_spec_indices
             if contracted_seq_group_metadata_list[idx].do_sample

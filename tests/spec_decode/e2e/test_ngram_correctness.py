@@ -286,8 +286,7 @@ def test_ngram_different_k(vllm_runner, common_llm_kwargs,
                              "num_speculative_tokens": 5,
                              "ngram_prompt_lookup_max": 3,
                              "speculative_disable_by_batch_size": 4
-                         },
-                         {
+                         }, {
                              "speculative_model": "[ngram]",
                              "num_speculative_tokens": 5,
                              "ngram_prompt_lookup_max": 3,
@@ -296,9 +295,7 @@ def test_ngram_different_k(vllm_runner, common_llm_kwargs,
                              "speculative_disable_mqa_scorer": True,
                              "max_num_batched_tokens": 4,
                              "max_num_seqs": 4
-                         }
-                         
-                         ])
+                         }])
 @pytest.mark.parametrize("batch_size", [1, 5])
 @pytest.mark.parametrize(
     "output_len",
