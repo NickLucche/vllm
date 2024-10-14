@@ -1083,6 +1083,7 @@ class LLMEngine:
             if seq_group.is_finished():
                 finished_before.append(i)
                 continue
+
             if has_multiple_outputs:
                 output = outputs_by_sequence_group[i]
             else:

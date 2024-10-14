@@ -126,7 +126,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             split_batch_by_proposal_len(
                 seq_group_metadata_list, proposal_lens_list)
 
-        target_seq_group_metadata_list = self._create_scoring_model_input(
+        spec_expanded_seq_group_metadata_list = self._create_scoring_model_input(
             seq_group_metadata_list=spec_seqs,
             proposal_token_ids=proposal_token_ids_list,
             # NOTE: We determine the seq ids in the expanded batch using the
@@ -135,12 +135,12 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 seq_ids=get_all_seq_ids(seq_group_metadata_list)),
         )
 
-        num_scoring_tokens = len(target_seq_group_metadata_list)
+        num_scoring_tokens = len(spec_expanded_seq_group_metadata_list)
         # Batch speculative and non-speculative (eg chunked prefill) requests
         # but make sure order is prefill|decode due to attention backend requirement
-        non_spec_seqs.extend(target_seq_group_metadata_list)
+        target_seq_group_metadata_list = non_spec_seqs + spec_expanded_seq_group_metadata_list
 
-        return (spec_indices, non_spec_indices, non_spec_seqs,
+        return (spec_indices, non_spec_indices, target_seq_group_metadata_list,
                 num_scoring_tokens)
 
     def _contract_batch(
@@ -204,7 +204,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             idx for idx in non_spec_indices
             if contracted_seq_group_metadata_list[idx].do_sample
         ]
-        if len(non_spec_target_token_ids):
+        if len(non_spec_indices):
             all_tokens[non_spec_indices, :1] = \
                 non_spec_target_token_ids.unsqueeze(1)
             all_probs[non_spec_indices, :1, :] = \
@@ -400,9 +400,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         # and non spec sequences) and should be removed in the future. It can be
         # done by supporting per-sequence proposal lens.
         #
-        # First samples are from speculative scoring, latter samples are non-
-        # speculative samples.
-        # should be opposite PREFILL | DECODE
+        # First samples are non-speculative, latter samples are from speculative
+        # scoring (prefill|decode order).
         split_sizes = (sampler_output.sampled_token_ids.numel() -
                        num_scoring_tokens, num_scoring_tokens)
         (non_spec_probs,

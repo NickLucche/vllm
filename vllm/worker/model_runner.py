@@ -1704,11 +1704,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if model_input.async_callback is not None:
             model_input.async_callback()
 
+        # Sample the next token.
         output: SamplerOutput = self.model.sample(
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
-
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time
                 and output is not None):
