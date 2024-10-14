@@ -195,10 +195,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         else:
             all_hidden_states = None
 
-        # TODO fix with `return_hidden_states=True` where hidden states are full size,
-        # and we'll need all indices prior to selecting `do_sample=True`,
-        # while logits are indexed by `selected_token_indices` True
-
         # Rule out prefills that are in `non_spec_indices` but produce no tokens.
         non_spec_indices = [
             idx for idx in non_spec_indices

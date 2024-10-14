@@ -1292,6 +1292,14 @@ class SpeculativeConfig:
                 "speculative_model unless the draft model config contains an "
                 "n_predict parameter.")
 
+        if enable_chunked_prefill and draft_hf_config.model_type in [
+                "medusa", "mlp_speculator", "eagle"
+        ]:
+            raise ValueError(
+                "Chunked prefill and hidden-state based draft models are not "
+                "yet compatible."
+            )
+
         if typical_acceptance_sampler_posterior_threshold is None:
             typical_acceptance_sampler_posterior_threshold = 0.09
         if typical_acceptance_sampler_posterior_alpha is None:

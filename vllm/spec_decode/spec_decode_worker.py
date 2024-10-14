@@ -584,6 +584,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         hidden_states = sampler_output.hidden_states
         if hidden_states is not None:
             # remove hidden_states for prompt tokens
+            # TODO Enable `return_hidden_states`: prefill chunks hidden states are
+            # pruned by the logits processor. Also, they should be arranged back into
+            # full-prefill latent. Address it to enable MLPSpeculator.
             if any(seq.is_prompt
                    for seq in execute_model_req.seq_group_metadata_list):
                 hidden_states = hidden_states[
@@ -698,7 +701,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # TODO skip this if chunking is not enabled
         if len(non_spec_indices):
             all_hidden_states = proposal_scores.hidden_states
-            # TODO fix `return_hidden_states`
+            # TODO fix `return_hidden_states`, same as in `_run_no_spec`
             if all_hidden_states is not None:
                 prefill_hidden_states = all_hidden_states[non_spec_indices]
                 execute_model_req.previous_hidden_states = prepare_prefill_hidden_states(
