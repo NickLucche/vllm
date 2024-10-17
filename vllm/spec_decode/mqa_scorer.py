@@ -22,11 +22,10 @@ class MQAScorer(SpeculativeScorer):
         for i, seq_group_metadata in enumerate(
                 execute_model_req.seq_group_metadata_list):
             if all_proposal_lengths[i] == 0:
-                # no need to create a new seq for prompts, just like batch expansion, 
-                # keep these seqs untouched and create new ones for the decodes, 
-                # so similar it should just work..but instead it doesnt lol
+                # Keep prompt seqs untouched (keep computed_tokens for chunks).
                 target_seq_group_metadata_list.append(seq_group_metadata)
                 continue
+
             seq_data_dict = seq_group_metadata.seq_data
             assert len(seq_data_dict) == 1
             seq_id = next(iter(seq_data_dict.keys()))
@@ -43,18 +42,10 @@ class MQAScorer(SpeculativeScorer):
                 prompt_token_ids=prompt_token_ids,
                 output_token_ids=new_output_token_ids,
             )
-            # if seq_group_metadata.is_prompt:
-            # # if not seq_group_metadata.do_sample:
-            #     # keep num computed tokens
-            #     new_seq_data.update_num_computed_tokens(seq_data._num_computed_tokens)
-            # else:
-            #     new_seq_data.update_num_computed_tokens(
-            #         len(prompt_token_ids) + len(output_token_ids) - 1)
             new_seq_data.update_num_computed_tokens(
                 len(prompt_token_ids) + len(output_token_ids) - 1)
 
-            # Ensure that the new sequence has at least one token
-            # because we only use mqa scorer in the decoding stage.
+            # Ensure that the new decode sequence has at least one token.
             assert len(output_token_ids) >= 1
             new_seq_data_dict = {target_seq_id: new_seq_data}
 
@@ -67,9 +58,6 @@ class MQAScorer(SpeculativeScorer):
                     target_seq_id: seq_group_metadata.block_tables[seq_id],
                 },
                 lora_request=None,
-                # this could be a chunk so we need to propagate this info
-                # token_chunk_size=seq_group_metadata.token_chunk_size,
-                # do_sample=seq_group_metadata.do_sample,
             )
             target_seq_group_metadata_list.append(new_seq_group_metadata)
 
@@ -92,6 +80,7 @@ class MQAScorer(SpeculativeScorer):
             all_probs = target_probs.reshape(bs, k + 1, self._vocab_size)
             all_logprobs = target_logprobs.reshape(bs, k + 1, self._vocab_size)
         else:
+            # We either have decodes with different lens or prefill+decodes.
             all_tokens = target_token_ids.new_full(size=(bs, k + 1),
                                                    fill_value=-1)
             all_probs = target_probs.new_zeros(*all_tokens.shape,
