@@ -89,7 +89,8 @@ class MQAScorer(SpeculativeScorer):
                                                     fill_value=-float("inf"))
             target_token_ids = target_token_ids.flatten()
             start_loc = 0
-            for i, (proposed_len, seq_meta) in enumerate(zip(all_proposal_lengths, target_seq_group_metadata_list)):
+            for i, (proposed_len, seq_meta) in enumerate(
+                    zip(all_proposal_lengths, target_seq_group_metadata_list)):
                 # Skip chunks with no output tokens.
                 if seq_meta.do_sample:
                     output_len = proposed_len + 1
@@ -100,7 +101,7 @@ class MQAScorer(SpeculativeScorer):
                     all_logprobs[
                         i, :output_len] = target_logprobs[start_loc:end_loc]
                     start_loc = end_loc
-        # TODO Likely want to return hidden states anyways even if no output token is present
+
         hidden_states = None
         if target_sampler_output.hidden_states is not None:
             hidden_states = target_sampler_output.hidden_states.reshape(

@@ -213,48 +213,44 @@ class FlashAttentionMetadata(AttentionMetadata):
             use_cuda_graph=self.use_cuda_graph,
         )
         return self._cached_decode_metadata
-    
+
     @cached_property
-    def query_start_loc_combined(self):
+    def query_start_loc_combined(self) -> Optional[torch.Tensor]:
         """
             Cached `query_start_loc` of the combined prefill|decode requests.
         """
         prefill_meta, decode_meta = self.prefill_metadata, self.decode_metadata
-        if prefill_meta is None:
-            return decode_meta.query_start_loc
-        if decode_meta is None:
-            return prefill_meta.query_start_loc
-        combined_loc = torch.cat([prefill_meta.query_start_loc, 
-                                  decode_meta.query_start_loc[1:]], axis=0)
-        return combined_loc
+        # Make mypy happy
+        if (decode_meta and prefill_meta
+                and (pq := prefill_meta.query_start_loc)
+                and (dq := decode_meta.query_start_loc)):
+            combined_loc = torch.cat([pq, dq[1:]], axis=0)
+            return combined_loc
+        return None
 
     @cached_property
-    def seq_start_loc_combined(self):
+    def seq_start_loc_combined(self) -> Optional[torch.Tensor]:
         """
             Cached `seq_start_loc` of the combined prefill|decode requests.
         """
         prefill_meta, decode_meta = self.prefill_metadata, self.decode_metadata
-        if prefill_meta is None:
-            return decode_meta.seq_start_loc
-        if decode_meta is None:
-            return prefill_meta.seq_start_loc
-        combined_loc = torch.cat([prefill_meta.seq_start_loc, 
-                                  decode_meta.seq_start_loc[1:]], axis=0)
-        return combined_loc
+        if (decode_meta and prefill_meta and (ps := prefill_meta.seq_start_loc)
+                and (ds := decode_meta.seq_start_loc)):
+            combined_loc = torch.cat([ps, ds[1:]], axis=0)
+            return combined_loc
+        return None
 
     @cached_property
-    def block_tables_combined(self):
+    def block_tables_combined(self) -> Optional[torch.Tensor]:
         """
             Cached `block_tables` of the combined prefill|decode requests.
         """
         prefill_meta, decode_meta = self.prefill_metadata, self.decode_metadata
-        if prefill_meta is None:
-            return decode_meta.block_tables
-        if decode_meta is None:
-            return prefill_meta.block_tables
-        combined_table = torch.cat([prefill_meta.block_tables, 
-                                  decode_meta.block_tables], axis=0)
-        return combined_table
+        if (decode_meta and prefill_meta and (pb := prefill_meta.block_tables)
+                and (db := decode_meta.block_tables)):
+            combined_table = torch.cat([pb, db], axis=0)
+            return combined_table
+        return None
 
     def advance_step(self,
                      model_input: "ModelInputForGPUWithSamplingMetadata",
@@ -669,7 +665,8 @@ def unified_flash_attention(
     assert current_metadata is not None
     assert isinstance(current_metadata, FlashAttentionMetadata)
     attn_metadata: FlashAttentionMetadata = current_metadata
-    assert attn_metadata.prefill_metadata is not None or attn_metadata.decode_metadata is not None
+    assert (attn_metadata.prefill_metadata is not None
+            or attn_metadata.decode_metadata is not None)
 
     num_tokens, hidden_size = query.shape
     # Reshape the query, key, and value tensors.
@@ -703,17 +700,20 @@ def unified_flash_attention(
                 f"value : {value.shape} : #prefill toks {num_prefill_tokens} : #decode toks {num_decode_tokens}" # noqa
 
     # Batch with mixed prefills and decodes (`enable_chunked_prefill` on), do a
-    # single kernel call for efficiency. 
-    if (prefill_meta := attn_metadata.prefill_metadata) and (decode_meta := attn_metadata.decode_metadata):
+    # single kernel call for efficiency.
+    if (prefill_meta := attn_metadata.prefill_metadata) and (
+            decode_meta := attn_metadata.decode_metadata):
         output = flash_attn_varlen_func(
             q=query,
             k=key_cache,
             v=value_cache,
-            # Use cached props to avoid multiple instantiations across layers. 
+            # Use cached props to avoid multiple instantiations across layers.
             cu_seqlens_q=attn_metadata.query_start_loc_combined,
             cu_seqlens_k=attn_metadata.seq_start_loc_combined,
-            max_seqlen_q=max(prefill_meta.max_prefill_seq_len, decode_meta.max_decode_query_len),
-            max_seqlen_k=max(prefill_meta.max_prefill_seq_len, decode_meta.max_decode_seq_len),
+            max_seqlen_q=max(prefill_meta.max_prefill_seq_len,
+                             decode_meta.max_decode_query_len),
+            max_seqlen_k=max(prefill_meta.max_prefill_seq_len,
+                             decode_meta.max_decode_seq_len),
             softmax_scale=softmax_scale,
             causal=True,
             alibi_slopes=alibi_slopes,
@@ -733,7 +733,7 @@ def unified_flash_attention(
     assert decode_query.shape[0] == num_decode_tokens
 
     prefill_output: Optional[torch.Tensor] = None
-    decode_output: Optional[torch.Tensor] = None   
+    decode_output: Optional[torch.Tensor] = None
 
     if prefill_meta := attn_metadata.prefill_metadata:
         # Prompt run.
@@ -810,6 +810,7 @@ def unified_flash_attention(
                 softcap=logits_soft_cap,
             ).squeeze(1)
         return decode_output.view(num_decode_tokens, hidden_size)
+
 
 @unified_flash_attention.register_fake
 def _(

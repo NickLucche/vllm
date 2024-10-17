@@ -10,8 +10,8 @@ import torch
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import ExecuteModelRequest, SequenceOutput
-from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
+from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.metrics import (AsyncMetricsCollector,
                                       SpecDecodeWorkerMetrics)
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
@@ -827,7 +827,8 @@ def test_handle_finished_requests():
 @pytest.mark.parametrize("acceptance_sampler_method",
                          ["rejection_sampler", "typical_acceptance_sampler"])
 @torch.inference_mode()
-def test_chunked_prefill_flow(k: int, batch_size: int, acceptance_sampler_method: str):
+def test_chunked_prefill_flow(k: int, batch_size: int,
+                              acceptance_sampler_method: str):
     """
         Verify SpecDecodeWorker calls match the expected flow.
     """
@@ -845,13 +846,15 @@ def test_chunked_prefill_flow(k: int, batch_size: int, acceptance_sampler_method
     worker.scorer = mock_worker(BatchExpansionTop1Scorer)
     worker.scorer.score_proposals.side_effect = ValueError(exception_secret)
 
-    # Create batch with combination of terminal/non-terminal prefill chunks 
+    # Create batch with combination of terminal/non-terminal prefill chunks
     # and decodes (different seq_ids).
     decodes, _, _ = create_batch(batch_size, k)
     # Pre-chunking here, get 'batch_size' chunks.
-    prefill, _, _ = create_batch(batch_size, k, prefill_chunk_size=4,
-                                 seq_ids=map(str, range(batch_size, batch_size*2)))
-    
+    prefill, _, _ = create_batch(batch_size,
+                                 k,
+                                 prefill_chunk_size=4,
+                                 seq_ids=range(batch_size, batch_size * 2))
+
     n_prefills = random.randint(0, batch_size)
     n_decodes = batch_size - n_prefills
 
@@ -859,38 +862,38 @@ def test_chunked_prefill_flow(k: int, batch_size: int, acceptance_sampler_method
     decodes = random.sample(decodes, n_decodes)
     target_group_metadata_list = prefill + decodes
     execute_model_req = ExecuteModelRequest(
-        seq_group_metadata_list=target_group_metadata_list, num_lookahead_slots=k)
+        seq_group_metadata_list=target_group_metadata_list,
+        num_lookahead_slots=k)
 
     target_token_ids = torch.randint(low=0,
-                                    high=vocab_size,
-                                    size=(1, batch_size * (k + 1)),
-                                    dtype=torch.int64,
-                                    device='cuda')
+                                     high=vocab_size,
+                                     size=(1, batch_size * (k + 1)),
+                                     dtype=torch.int64,
+                                     device='cuda')
     target_token_probs = torch.rand(1,
                                     batch_size * (k + 1),
                                     vocab_size,
                                     dtype=torch.float32,
                                     device='cuda')
     target_token_logprobs = torch.rand(1,
-                                    batch_size * (k + 1),
-                                    vocab_size,
-                                    dtype=torch.float32,
-                                    device='cuda')
+                                       batch_size * (k + 1),
+                                       vocab_size,
+                                       dtype=torch.float32,
+                                       device='cuda')
     target_output = create_sampler_output_list(target_token_ids,
-                                            target_token_probs,
-                                            target_token_logprobs)
+                                               target_token_probs,
+                                               target_token_logprobs)
 
-    target_worker.execute_model.return_value = [target_output[0]] 
+    target_worker.execute_model.return_value = [target_output[0]]
 
-    
     if not len(decodes):
         worker.execute_model(execute_model_req=execute_model_req)
-        # no spec run (prefill only) 
+        # no spec run (prefill only)
         draft_worker.execute_model.assert_called_once_with(execute_model_req)
         target_worker.execute_model.assert_called_once_with(execute_model_req)
     else:
-        # Decode-only run OR mixed batch, scorer call fails (it's mocked) 
+        # Decode-only run OR mixed batch, scorer call fails (it's mocked)
         with pytest.raises(ValueError, match=exception_secret):
             worker.execute_model(execute_model_req=execute_model_req)
-        # but firtst draft still counted  
-        draft_worker.get_spec_proposals.call_count == 1
+        # but firtst draft still counted
+        assert draft_worker.get_spec_proposals.call_count == 1
