@@ -158,7 +158,6 @@ class ModelConfig:
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
-
         self.hf_config = get_config(self.model, trust_remote_code, revision,
                                     code_revision, rope_scaling, rope_theta,
                                     config_format)
@@ -1206,6 +1205,10 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{speculative_disable_by_batch_size=}")
 
+        if disable_logprobs is not None and enable_chunked_prefill: 
+            raise ValueError("Chunked prefill and" 
+                             "`disable-logprobs-during-spec-decoding` are "
+                            "not yet compatible.")
         if not use_v2_block_manager:
             raise ValueError(
                 "Speculative decoding requires usage of the V2 "
