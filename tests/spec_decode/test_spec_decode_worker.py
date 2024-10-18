@@ -823,12 +823,11 @@ def test_handle_finished_requests():
 
 
 @pytest.mark.parametrize('k', [3])
-@pytest.mark.parametrize('batch_size', [1, 2, 32])
-@pytest.mark.parametrize("acceptance_sampler_method",
-                         ["rejection_sampler", "typical_acceptance_sampler"])
+@pytest.mark.parametrize('batch_size', [2, 32])
+@pytest.mark.parametrize("batch_composition",
+                         ["prefill_only", "decode_only", "mixed"])
 @torch.inference_mode()
-def test_chunked_prefill_flow(k: int, batch_size: int,
-                              acceptance_sampler_method: str):
+def test_chunked_prefill_flow(k: int, batch_size: int, batch_composition: str):
     """
         Verify SpecDecodeWorker calls match the expected flow.
     """
@@ -836,12 +835,11 @@ def test_chunked_prefill_flow(k: int, batch_size: int,
     draft_worker = mock_worker(cls=MultiStepWorker)
     target_worker = mock_worker()
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
-    worker = SpecDecodeWorker(
-        draft_worker,
-        target_worker,
-        mock_spec_decode_sampler(acceptance_sampler_method),
-        disable_logprobs=False,
-        metrics_collector=metrics_collector)
+    worker = SpecDecodeWorker(draft_worker,
+                              target_worker,
+                              mock_spec_decode_sampler("rejection_sampler"),
+                              disable_logprobs=False,
+                              metrics_collector=metrics_collector)
     exception_secret = 'artificial stop'
     worker.scorer = mock_worker(BatchExpansionTop1Scorer)
     worker.scorer.score_proposals.side_effect = ValueError(exception_secret)
@@ -853,9 +851,15 @@ def test_chunked_prefill_flow(k: int, batch_size: int,
     prefill, _, _ = create_batch(batch_size,
                                  k,
                                  prefill_chunk_size=4,
-                                 seq_ids=range(batch_size, batch_size * 2))
+                                 seq_ids=list(range(batch_size,
+                                                    batch_size * 2)))
 
-    n_prefills = random.randint(0, batch_size)
+    if batch_composition == "prefill_only":
+        n_prefills = batch_size
+    elif batch_composition == "decode_only":
+        n_prefills = 0
+    else:
+        n_prefills = random.randint(1, batch_size - 1)
     n_decodes = batch_size - n_prefills
 
     prefill = random.sample(prefill, n_prefills)
@@ -895,5 +899,5 @@ def test_chunked_prefill_flow(k: int, batch_size: int,
         # Decode-only run OR mixed batch, scorer call fails (it's mocked)
         with pytest.raises(ValueError, match=exception_secret):
             worker.execute_model(execute_model_req=execute_model_req)
-        # but firtst draft still counted
+        # but first draft still counted
         assert draft_worker.get_spec_proposals.call_count == 1
