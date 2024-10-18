@@ -1205,10 +1205,6 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{speculative_disable_by_batch_size=}")
 
-        if disable_logprobs is not None and enable_chunked_prefill:
-            raise ValueError("Chunked prefill and"
-                             "`disable-logprobs-during-spec-decoding` are "
-                             "not yet compatible.")
         if not use_v2_block_manager:
             raise ValueError(
                 "Speculative decoding requires usage of the V2 "
@@ -1282,7 +1278,7 @@ class SpeculativeConfig:
             ]:
                 raise ValueError(
                     "Chunked prefill and hidden-state based draft models are "
-                    "not yet compatible.")
+                    "not compatible.")
 
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(
