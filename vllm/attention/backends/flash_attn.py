@@ -1,6 +1,5 @@
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from functools import cached_property
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
@@ -213,44 +212,6 @@ class FlashAttentionMetadata(AttentionMetadata):
             use_cuda_graph=self.use_cuda_graph,
         )
         return self._cached_decode_metadata
-
-    @cached_property
-    def query_start_loc_combined(self) -> Optional[torch.Tensor]:
-        """
-            Cached `query_start_loc` of the combined prefill|decode requests.
-        """
-        prefill_meta, decode_meta = self.prefill_metadata, self.decode_metadata
-        # Make mypy happy
-        if (decode_meta and prefill_meta
-                and (pq := prefill_meta.query_start_loc)
-                and (dq := decode_meta.query_start_loc)):
-            combined_loc = torch.cat([pq, dq[1:]], axis=0)
-            return combined_loc
-        return None
-
-    @cached_property
-    def seq_start_loc_combined(self) -> Optional[torch.Tensor]:
-        """
-            Cached `seq_start_loc` of the combined prefill|decode requests.
-        """
-        prefill_meta, decode_meta = self.prefill_metadata, self.decode_metadata
-        if (decode_meta and prefill_meta and (ps := prefill_meta.seq_start_loc)
-                and (ds := decode_meta.seq_start_loc)):
-            combined_loc = torch.cat([ps, ds[1:]], axis=0)
-            return combined_loc
-        return None
-
-    @cached_property
-    def block_tables_combined(self) -> Optional[torch.Tensor]:
-        """
-            Cached `block_tables` of the combined prefill|decode requests.
-        """
-        prefill_meta, decode_meta = self.prefill_metadata, self.decode_metadata
-        if (decode_meta and prefill_meta and (pb := prefill_meta.block_tables)
-                and (db := decode_meta.block_tables)):
-            combined_table = torch.cat([pb, db], axis=0)
-            return combined_table
-        return None
 
     def advance_step(self,
                      model_input: "ModelInputForGPUWithSamplingMetadata",
@@ -703,13 +664,15 @@ def unified_flash_attention(
     # single kernel call for efficiency.
     if (prefill_meta := attn_metadata.prefill_metadata) and (
             decode_meta := attn_metadata.decode_metadata):
+        assert (prefill_meta.max_prefill_seq_len
+                and decode_meta.max_decode_query_len)
         output = flash_attn_varlen_func(
             q=query,
             k=key_cache,
             v=value_cache,
             # Use cached props to avoid multiple instantiations across layers.
-            cu_seqlens_q=attn_metadata.query_start_loc_combined,
-            cu_seqlens_k=attn_metadata.seq_start_loc_combined,
+            cu_seqlens_q=attn_metadata.query_start_loc,
+            cu_seqlens_k=attn_metadata.seq_start_loc,
             max_seqlen_q=max(prefill_meta.max_prefill_seq_len,
                              decode_meta.max_decode_query_len),
             max_seqlen_k=max(prefill_meta.max_prefill_seq_len,
@@ -718,7 +681,7 @@ def unified_flash_attention(
             causal=True,
             alibi_slopes=alibi_slopes,
             softcap=logits_soft_cap,
-            block_table=attn_metadata.block_tables_combined,
+            block_table=attn_metadata.block_tables,
         )
         return output.view(num_tokens, hidden_size)
 
