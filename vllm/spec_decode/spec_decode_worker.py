@@ -521,19 +521,17 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         completion_seq_group_output_list: List[
             CompletionSequenceGroupOutput] = []
         output_index = 0
-        # Make sure the even prefill chunks are still aligned with their own
-        # empty output. One single samplerout to avoid
-        # `create_output_by_sequence_group` later in postprocessing.
+        # Make sure the non-terminal prefill chunks are still aligned with
+        # their own empty output.
         for seq_group_meta in execute_model_req.seq_group_metadata_list:
             # Since we can get chunks here, we dont always have a sampled token
-            # to serialize (only on last chunk), but we have to keep it aligned
+            # (only on last chunk) but we still have to provide an output.
             if not seq_group_meta.do_sample:
-                # no token
                 completion_seq_group_output_list.append(
                     CompletionSequenceGroupOutput(samples=[],
                                                   prompt_logprobs=None))
             else:
-                # sequence with output
+                # Sequence with output.
                 seq_id, seq_data = seq_data_entries[output_index]
                 needs_prompt_logprobs = seq_output_prompt_logprobs[
                     output_index]
