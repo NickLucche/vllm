@@ -104,6 +104,7 @@ __device__ void paged_attention_kernel(
     const int* __restrict__ seq_lens,      // [num_seqs]
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
+    const float* __restrict__ custom_attn_bias,  // [num_seqs, num_heads, head_size]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
     const float k_scale, const float v_scale, const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
@@ -153,6 +154,15 @@ __device__ void paged_attention_kernel(
   const int kv_head_idx = head_idx / num_queries_per_kv;
   const float alibi_slope =
       alibi_slopes == nullptr ? 0.f : alibi_slopes[head_idx];
+  // TODO check if indexing still makes sense
+  // const int num_context_blocks = DIVIDE_ROUND_UP(context_len, BLOCK_SIZE);
+  // seq_len indexes on 'max_seq_lens' dim, 
+  // it's like renaming dim you get custom_attn_bias: seq_len x num_kv_heads x seq_len
+  // TODO each seq has can have different len (seq_lens) but only one bias!!
+  const float* attn_bias_vec = custom_attn_bias == nullptr
+                                     ? nullptr
+                                     : custom_attn_bias[seq_idx * num_kv_heads * seq_len +
+                                           kv_head_idx * seq_len];
 
   // A vector type to store a part of a key or a query.
   // The vector size is configured in such a way that the threads in a thread
@@ -293,8 +303,10 @@ __device__ void paged_attention_kernel(
       // This includes a reduction across the threads in the same thread group.
       float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(
                              q_vecs[thread_group_offset], k_vecs);
+      // NOTE here each thread adds its own alibi (one per head..) like I am sure not the whole group needs to do so
       // Add the ALiBi bias if slopes are given.
       qk += (alibi_slope != 0) ? alibi_slope * (token_idx - seq_len + 1) : 0;
+      qk += (attn_bias_vec != nullptr) ? attn_bias_vec[token_idx] : 0;
 
       if (thread_group_offset == 0) {
         // Store the partial reductions to shared memory.
@@ -512,6 +524,7 @@ __global__ void paged_attention_v1_kernel(
     const int* __restrict__ seq_lens,      // [num_seqs]
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
+    const float* __restrict__ attn_bias,
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
     const float k_scale, const float v_scale, const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
@@ -520,7 +533,7 @@ __global__ void paged_attention_v1_kernel(
                          KV_DTYPE, IS_BLOCK_SPARSE>(
       /* exp_sums */ nullptr, /* max_logits */ nullptr, out, q, k_cache,
       v_cache, num_kv_heads, scale, block_tables, seq_lens,
-      max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride,
+      max_num_blocks_per_seq, alibi_slopes, attn_bias, q_stride, kv_block_stride,
       kv_head_stride, k_scale, v_scale, tp_rank, blocksparse_local_blocks,
       blocksparse_vert_stride, blocksparse_block_size,
       blocksparse_head_sliding_step);
@@ -548,6 +561,7 @@ __global__ void paged_attention_v2_kernel(
     const int* __restrict__ seq_lens,      // [num_seqs]
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
+    const float* __restrict__ attn_bias,
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
     const float k_scale, const float v_scale, const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
@@ -555,7 +569,7 @@ __global__ void paged_attention_v2_kernel(
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS,
                          KV_DTYPE, IS_BLOCK_SPARSE, PARTITION_SIZE>(
       exp_sums, max_logits, tmp_out, q, k_cache, v_cache, num_kv_heads, scale,
-      block_tables, seq_lens, max_num_blocks_per_seq, alibi_slopes, q_stride,
+      block_tables, seq_lens, max_num_blocks_per_seq, alibi_slopes, attn_bias, q_stride,
       kv_block_stride, kv_head_stride, k_scale, v_scale, tp_rank,
       blocksparse_local_blocks, blocksparse_vert_stride, blocksparse_block_size,
       blocksparse_head_sliding_step);
