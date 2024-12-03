@@ -104,7 +104,7 @@ __device__ void paged_attention_kernel(
     const int* __restrict__ seq_lens,      // [num_seqs]
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
-    const float* __restrict__ custom_attn_bias,  // [num_seqs, num_heads, head_size]
+    const float* __restrict__ attn_bias,  // [num_seqs, num_heads, head_size]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
     const float k_scale, const float v_scale, const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
@@ -157,12 +157,12 @@ __device__ void paged_attention_kernel(
   // TODO check if indexing still makes sense
   // const int num_context_blocks = DIVIDE_ROUND_UP(context_len, BLOCK_SIZE);
   // seq_len indexes on 'max_seq_lens' dim, 
-  // it's like renaming dim you get custom_attn_bias: seq_len x num_kv_heads x seq_len
+  // it's like renaming dim you get attn_bias: seq_len x num_kv_heads x seq_len
   // TODO each seq has can have different len (seq_lens) but only one bias!!
-  const float* attn_bias_vec = custom_attn_bias == nullptr
+  const float* attn_bias_vec = attn_bias == nullptr
                                      ? nullptr
-                                     : custom_attn_bias[seq_idx * num_kv_heads * seq_len +
-                                           kv_head_idx * seq_len];
+                                     : attn_bias + seq_idx * num_kv_heads * seq_len +
+                                           kv_head_idx * seq_len;
 
   // A vector type to store a part of a key or a query.
   // The vector size is configured in such a way that the threads in a thread

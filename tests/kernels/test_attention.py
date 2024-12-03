@@ -113,9 +113,7 @@ def ref_single_query_cached_kv_attention(
                 1, 1, -1)
             bias = alibi_bias
         if attn_bias is not None:
-            assert attn_bias.shape[0] == alibi_bias.shape[0]
-            # TODO num_kv_heads?
-            assert attn_bias.shape == [num_query_heads, num_seqs, num_seqs]
+            attn_bias = torch.randn(num_query_heads, q.shape[0], seq_len, dtype=torch.float)
             bias = attn_bias if bias is None else bias + attn_bias 
 
         out = ref_masked_attention(q, keys, values, scale, bias)
@@ -166,9 +164,6 @@ def test_paged_attention(
     alibi_slopes, attn_bias = None, None
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads, dtype=torch.float)
-    if use_custom_attn_bias:
-        # TODO different dtype?
-        alibi_slopes = torch.randn(num_query_heads, num_seqs, num_seqs, dtype=torch.float)
 
     seq_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
     seq_lens[-1] = MAX_SEQ_LEN
@@ -328,6 +323,7 @@ def test_paged_attention(
         seq_lens,
         scale,
         alibi_slopes,
+        attn_bias
     )
 
     # NOTE(woosuk): Due to the kernel-level differences in the two
