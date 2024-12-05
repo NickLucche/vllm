@@ -36,9 +36,9 @@
       <<<grid, block, shared_mem_size, stream>>>(                              \
           exp_sums_ptr, max_logits_ptr, tmp_out_ptr, query_ptr, key_cache_ptr, \
           value_cache_ptr, num_kv_heads, scale, block_tables_ptr,              \
-          seq_lens_ptr, max_num_blocks_per_seq, alibi_slopes_ptr, attn_bias_ptr, q_stride,    \
-          kv_block_stride, kv_head_stride, k_scale, v_scale, tp_rank,          \
-          blocksparse_local_blocks, blocksparse_vert_stride,                   \
+          seq_lens_ptr, max_num_blocks_per_seq, alibi_slopes_ptr,              \
+          attn_bias_ptr, q_stride, kv_block_stride, kv_head_stride, k_scale,   \
+          v_scale, tp_rank, blocksparse_local_blocks, blocksparse_vert_stride, \
           blocksparse_block_size, blocksparse_head_sliding_step);              \
   vllm::paged_attention_v2_reduce_kernel<T, HEAD_SIZE, NUM_THREADS,            \
                                          PARTITION_SIZE>                       \
@@ -54,9 +54,9 @@ void paged_attention_v2_launcher(
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, int num_kv_heads, float scale,
     torch::Tensor& block_tables, torch::Tensor& seq_lens, int max_seq_len,
-    const c10::optional<torch::Tensor>& alibi_slopes, 
-    const c10::optional<torch::Tensor>& attn_bias, float k_scale,
-    float v_scale, const int tp_rank, const int blocksparse_local_blocks,
+    const c10::optional<torch::Tensor>& alibi_slopes,
+    const c10::optional<torch::Tensor>& attn_bias, float k_scale, float v_scale,
+    const int tp_rank, const int blocksparse_local_blocks,
     const int blocksparse_vert_stride, const int blocksparse_block_size,
     const int blocksparse_head_sliding_step) {
   int num_seqs = query.size(0);
@@ -76,9 +76,8 @@ void paged_attention_v2_launcher(
           ? reinterpret_cast<const float*>(alibi_slopes.value().data_ptr())
           : nullptr;
   const float* attn_bias_ptr =
-      attn_bias
-          ? reinterpret_cast<const float*>(attn_bias.value().data_ptr())
-          : nullptr;
+      attn_bias ? reinterpret_cast<const float*>(attn_bias.value().data_ptr())
+                : nullptr;
 
   T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
   float* exp_sums_ptr = reinterpret_cast<float*>(exp_sums.data_ptr());
@@ -147,8 +146,7 @@ void paged_attention_v2_launcher(
                               IS_BLOCK_SPARSE>(                               \
       out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,      \
       num_kv_heads, scale, block_tables, seq_lens, max_seq_len, alibi_slopes, \
-      attn_bias,                                                              \
-      k_scale, v_scale, tp_rank, blocksparse_local_blocks,                    \
+      attn_bias, k_scale, v_scale, tp_rank, blocksparse_local_blocks,         \
       blocksparse_vert_stride, blocksparse_block_size,                        \
       blocksparse_head_sliding_step);
 
