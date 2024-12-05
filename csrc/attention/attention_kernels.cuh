@@ -158,7 +158,7 @@ __device__ void paged_attention_kernel(
   // const int num_context_blocks = DIVIDE_ROUND_UP(context_len, BLOCK_SIZE);
   // seq_len indexes on 'max_seq_lens' dim, 
   // it's like renaming dim you get attn_bias: seq_len x num_kv_heads x seq_len
-  // TODO each seq has can have different len (seq_lens) but only one bias!!
+  // TODO each seq can have different len (seq_lens) but only one bias!!
   const float* attn_bias_vec = attn_bias == nullptr
                                      ? nullptr
                                      : attn_bias + seq_idx * num_kv_heads * seq_len +

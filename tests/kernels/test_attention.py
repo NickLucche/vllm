@@ -61,17 +61,11 @@ def ref_masked_attention(
 
 
 def ref_single_query_cached_kv_attention(
-    output: torch.Tensor,
-    query: torch.Tensor,
-    num_queries_per_kv: int,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    block_tables: torch.Tensor,
-    seq_lens: torch.Tensor,
-    scale: float,
-    alibi_slopes: Optional[torch.Tensor],
-    attn_bias: Optional[torch.Tensor]
-) -> None:
+        output: torch.Tensor, query: torch.Tensor, num_queries_per_kv: int,
+        key_cache: torch.Tensor, value_cache: torch.Tensor,
+        block_tables: torch.Tensor, seq_lens: torch.Tensor, scale: float,
+        alibi_slopes: Optional[torch.Tensor],
+        attn_bias: Optional[List[torch.Tensor]]) -> None:
     num_query_heads = query.shape[1]
     num_kv_heads = value_cache.shape[1]
     head_size = value_cache.shape[2]
@@ -113,8 +107,12 @@ def ref_single_query_cached_kv_attention(
                 1, 1, -1)
             bias = alibi_bias
         if attn_bias is not None:
-            attn_bias = torch.randn(num_query_heads, q.shape[0], seq_len, dtype=torch.float)
-            bias = attn_bias if bias is None else bias + attn_bias 
+            # attn_bias = torch.randn(num_query_heads,
+            #                         q.shape[0],
+            #                         seq_len,
+            #                         dtype=torch.float)
+            # TODO test alibi + bias
+            bias = attn_bias[i] if bias is None else bias + attn_bias[i]
 
         out = ref_masked_attention(q, keys, values, scale, bias)
         out = out.view(num_query_heads, head_size)
@@ -169,6 +167,17 @@ def test_paged_attention(
     seq_lens[-1] = MAX_SEQ_LEN
     max_seq_len = max(seq_lens)
     seq_lens = torch.tensor(seq_lens, dtype=torch.int)
+    attn_bias_list = None
+    if use_custom_attn_bias:
+        # TODO 1d flattened bias to support sequences of different
+        # lengths
+        # NOTE (NickLucche) each sequence can have a different bias,
+        # depending on its len
+        attn_bias_list = [torch.randn(num_query_heads,
+                        1,
+                        seq_len,
+                        dtype=torch.float) for seq_len in seq_lens]
+        attn_bias = torch.cat([b.flatten() for b in attn_bias_list])
 
     # Create the block tables.
     max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
@@ -207,6 +216,7 @@ def test_paged_attention(
             block_size,
             max_seq_len,
             alibi_slopes,
+            attn_bias,
             kv_cache_dtype,
             k_scale,
             v_scale,
@@ -215,6 +225,7 @@ def test_paged_attention(
         opcheck(torch.ops._C.paged_attention_v1,
                 (output, query, key_cache, value_cache, num_kv_heads, scale,
                  block_tables, seq_lens, block_size, max_seq_len, alibi_slopes,
+                 attn_bias,
                  kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
                 cond=(head_size == HEAD_SIZES[0]
                       and block_size == BLOCK_SIZES[0]))
@@ -248,6 +259,7 @@ def test_paged_attention(
                 block_size,
                 max_seq_len,
                 alibi_slopes,
+                attn_bias,
                 kv_cache_dtype,
                 k_scale,
                 v_scale,
@@ -257,6 +269,7 @@ def test_paged_attention(
                     (output, exp_sums, max_logits, tmp_output, query,
                      key_cache, value_cache, num_kv_heads, scale, block_tables,
                      seq_lens, block_size, max_seq_len, alibi_slopes,
+                     attn_bias,
                      kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
                     cond=(head_size == HEAD_SIZES[0]
                           and block_size == BLOCK_SIZES[0]))
@@ -313,18 +326,10 @@ def test_paged_attention(
         value_cache = dequantized_value_cache
 
     ref_output = torch.empty_like(query)
-    ref_single_query_cached_kv_attention(
-        ref_output,
-        query,
-        num_queries_per_kv,
-        key_cache,
-        value_cache,
-        block_tables,
-        seq_lens,
-        scale,
-        alibi_slopes,
-        attn_bias
-    )
+    ref_single_query_cached_kv_attention(ref_output, query, num_queries_per_kv,
+                                         key_cache, value_cache, block_tables,
+                                         seq_lens, scale, alibi_slopes,
+                                         attn_bias_list)
 
     # NOTE(woosuk): Due to the kernel-level differences in the two
     # implementations, there is a small numerical difference in the two
