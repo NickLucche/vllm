@@ -605,6 +605,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
+                decode_meta.attn_bias, # TODO or cross_attn_bias??
                 k_scale,
                 v_scale,
             )

@@ -468,6 +468,8 @@ void paged_attention_v1(
   TORCH_CHECK(k_scale == 1.0f && v_scale == 1.0f);
   TORCH_CHECK(blocksparse_vert_stride <= 1,
               "CPU backend does not support blocksparse attention yet.");
+  TORCH_CHECK(!attn_bias.has_value(),
+              "CPU backend does not support custom attention bias.");
   VLLM_DISPATCH_FLOATING_TYPES(query.scalar_type(), "paged_attention_v1_impl",
                                [&] {
                                  CPU_KERNEL_GUARD_IN(paged_attention_v1_impl)
@@ -791,6 +793,8 @@ void paged_attention_v2(
   TORCH_CHECK(k_scale == 1.0f && v_scale == 1.0f);
   TORCH_CHECK(blocksparse_vert_stride <= 1,
               "CPU backend does not support blocksparse attention yet.");
+  TORCH_CHECK(!attn_bias.has_value(),
+              "CPU backend does not support custom attention bias.");
   VLLM_DISPATCH_FLOATING_TYPES(query.scalar_type(), "paged_attention_v2_impl",
                                [&] {
                                  CPU_KERNEL_GUARD_IN(paged_attention_v2_impl)
