@@ -158,7 +158,7 @@ __device__ void paged_attention_kernel(
   // seq_len indexes on 'max_seq_lens' dim,
   // it's like renaming dim you get attn_bias: seq_len x num_kv_heads x seq_len
   // TODO each seq can have different len (seq_lens) but only one bias!!
-  // `max_seq_len` bias values for current sequence and current head
+  // NOTE (NickLucche) `max_seq_len` bias values for current sequence and current head
   const float* attn_bias_vec =
       attn_bias == nullptr
           ? nullptr
@@ -311,6 +311,7 @@ __device__ void paged_attention_kernel(
       // NOTE here each thread adds its own alibi (one per head..) like I am
       // sure not the whole group needs to do so Add the ALiBi bias if slopes
       // are given.
+      // TODO mutually exclusive?
       qk += (alibi_slope != 0) ? alibi_slope * (token_idx - seq_len + 1) : 0;
       qk += (attn_bias_vec != nullptr) ? attn_bias_vec[token_idx] : 0;
 

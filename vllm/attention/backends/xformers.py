@@ -577,6 +577,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     prefill_meta.context_lens_tensor,
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
+                    prefill_meta.attn_bias,
                     self.sliding_window,
                     k_scale,
                     v_scale,

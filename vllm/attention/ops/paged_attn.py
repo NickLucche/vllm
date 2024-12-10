@@ -206,11 +206,13 @@ class PagedAttention:
         context_lens: torch.Tensor,
         max_query_len: int,
         alibi_slopes: Optional[torch.Tensor],
+        attn_bias: Optional[torch.Tensor],
         sliding_window: Optional[int],
         k_scale: float,
         v_scale: float,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
+        assert attn_bias is None, "Bias for prefix not yet enabled"
         context_attention_fwd(
             query,
             key,

@@ -77,7 +77,9 @@ void paged_attention_v1_launcher(
   const float* attn_bias_ptr =
       attn_bias ? reinterpret_cast<const float*>(attn_bias.value().data_ptr())
                 : nullptr;
-
+  if (attn_bias_ptr){
+    TORCH_CHECK(attn_bias.value().dtype() == torch::kFloat32, "Unsupported bias dtype: ", attn_bias.value().dtype());
+  }
   T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
   CACHE_T* key_cache_ptr = reinterpret_cast<CACHE_T*>(key_cache.data_ptr());
