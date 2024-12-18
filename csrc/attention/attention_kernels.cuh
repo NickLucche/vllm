@@ -162,8 +162,9 @@ __device__ void paged_attention_kernel(
   const float* attn_bias_vec =
       attn_bias == nullptr
           ? nullptr
-          : attn_bias + seq_idx * num_kv_heads * num_seq_blocks * BLOCK_SIZE +
-                kv_head_idx * num_seq_blocks * BLOCK_SIZE;
+          : attn_bias + seq_idx * num_heads * num_seq_blocks * BLOCK_SIZE +
+                head_idx * num_seq_blocks * BLOCK_SIZE;
+          // : attn_bias + seq_idx * num_kv_heads * num_seq_blocks * BLOCK_SIZE +
   // const float* attn_bias_vec = attn_bias == nullptr
   //  ? nullptr
   //  : attn_bias + seq_idx * num_kv_heads * seq_len +
