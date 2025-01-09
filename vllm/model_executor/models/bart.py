@@ -357,6 +357,18 @@ class BartCrossAttention(nn.Module):
             k = None
             v = None
         else:
+            # you only need to do q = Wq@x here but WqWkWv are stacked  
+            # maybe self.qkv_proj.q.forward? and then Wk@xe, Wv@xe, stacked! 
+            # We only do this once on decoder prefill, then when decoding k,v are None
+            # and we use k=Wk@xe v=Wv@xe which we previously cached
+
+            # multiple options: ColumnParallel subclass with only q
+            # hack QKVParallel usage: have it load a single Wq matrix but with the logic 
+            # of handling qkv (so basically slice Wq1|Wq2|Wq3)..not sure about TP.
+            # This could probably be a subclass of QKVParallel that handles loading, forwarding 
+            # and stiching of output o1|o2|o3=q..
+            # or maybe opposite design, encapsulate two QKVParallel in a class, one for Q the other for KV
+            # and handle loading. I like this, but isnt it better to maybe encapsulate one columnparallel and one KVParallel? 
             qkv_enc, _ = self.qkv_proj(encoder_hidden_states)
             _, k, v = qkv_enc.split([self.q_size, self.kv_size, self.kv_size],
                                     dim=-1)
