@@ -1213,6 +1213,7 @@ class GGUFModelLoader(BaseModelLoader):
         num_layers = config.num_hidden_layers
         name_map = gguf.get_tensor_name_map(arch, num_layers)
         with torch.device("meta"):
+            # TODO why are we creating a model from transformers here?
             dummy_model = AutoModelForCausalLM.from_config(config)
         state_dict = dummy_model.state_dict()
 

@@ -203,7 +203,7 @@ class Gemma2DecoderLayer(nn.Module):
         self.mlp = Gemma2MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
+            hidden_act=config.hidden_activation,
             hidden_activation=config.hidden_activation,
             quant_config=quant_config,
         )
@@ -329,6 +329,7 @@ class Gemma2Model(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
+            print("LOADING", name)
             if scale_name := get_compressed_tensors_cache_scale(name):
                 # Loading kv cache scales for compressed-tensors quantization
                 param = params_dict[scale_name]

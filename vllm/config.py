@@ -307,7 +307,8 @@ class ModelConfig:
         has_interleaved_attention = (sliding_window is not None) and (
             isinstance(sliding_window, list) or
             (self.hf_text_config.model_type in ["gemma2", "cohere2"]))
-
+        print("HAS INTEERLEAVED", has_interleaved_attention)
+        print(self.hf_text_config)
         if (not self.disable_sliding_window and has_interleaved_attention):
             if envs.VLLM_ATTENTION_BACKEND == "XFORMERS":
                 sliding_window_len_min = get_min_sliding_window(
@@ -327,7 +328,8 @@ class ModelConfig:
                 # only the attention layer itself is aware of the sliding
                 # window, and use the window size to compute the attention.
                 self.hf_text_config.interleaved_sliding_window = sliding_window
-                delattr(self.hf_text_config, "sliding_window")
+                print("DELETINNGG")
+                # delattr(self.hf_text_config, "sliding_window")
                 sliding_window = None
 
         self.max_model_len = _get_and_verify_max_len(
