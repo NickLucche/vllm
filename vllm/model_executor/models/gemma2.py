@@ -129,6 +129,7 @@ class Gemma2Attention(nn.Module):
             bias=config.attention_bias,
             quant_config=quant_config,
         )
+        # breakpoint()
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -168,6 +169,7 @@ class Gemma2Attention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
+        breakpoint()
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
@@ -258,6 +260,7 @@ class Gemma2Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=quant_config
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -326,12 +329,12 @@ class Gemma2Model(nn.Module):
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
-        breakpoint()
+        # breakpoint()
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         print('my weights', params_dict.keys(), '\n\n')
         for name, loaded_weight in weights:
-            print("LOADING", name)
+            # print("LOADING", name)
             if scale_name := get_compressed_tensors_cache_scale(name):
                 # Loading kv cache scales for compressed-tensors quantization
                 param = params_dict[scale_name]
