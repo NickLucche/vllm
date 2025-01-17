@@ -162,7 +162,6 @@ class AutoWeightsLoader:
     ) -> Iterable[str]:
         if isinstance(module, PPMissingLayer):
             return
-
         # Avoid infinite recursion since this function is typically
         # called inside load_weights of the module itself
         if module != self.module:

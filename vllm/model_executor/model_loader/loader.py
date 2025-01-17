@@ -1212,6 +1212,7 @@ class GGUFModelLoader(BaseModelLoader):
             raise RuntimeError(f"Unknown gguf model_type: {model_type}")
         num_layers = config.num_hidden_layers
         name_map = gguf.get_tensor_name_map(arch, num_layers)
+        breakpoint()
         with torch.device("meta"):
             # TODO why are we creating a model from transformers here?
             dummy_model = AutoModelForCausalLM.from_config(config)

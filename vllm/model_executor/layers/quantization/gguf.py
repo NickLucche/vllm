@@ -120,6 +120,7 @@ class GGUFLinearMethod(LinearMethodBase):
     """
 
     def __init__(self, quant_config: GGUFConfig):
+        print("GGUF BEIN CALLEEEEEED")
         self.quant_config = quant_config
 
     def create_weights(self, layer: torch.nn.Module,

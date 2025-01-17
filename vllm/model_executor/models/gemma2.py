@@ -326,8 +326,10 @@ class Gemma2Model(nn.Module):
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
+        breakpoint()
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
+        print('my weights', params_dict.keys(), '\n\n')
         for name, loaded_weight in weights:
             print("LOADING", name)
             if scale_name := get_compressed_tensors_cache_scale(name):

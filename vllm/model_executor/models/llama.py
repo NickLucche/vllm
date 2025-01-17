@@ -384,6 +384,7 @@ class LlamaModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
+            print("DIO HANE", name)
             if "rotary_emb.inv_freq" in name:
                 continue
             if ("rotary_emb.cos_cached" in name
@@ -512,6 +513,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        print("QUANT CONFIG", quant_config)
         lora_config = vllm_config.lora_config
         self.config = config
         self.lora_config = lora_config
