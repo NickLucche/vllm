@@ -688,7 +688,12 @@ class QKVParallelLinear(ColumnParallelLinear):
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+                 prefix: str = "",
+                 *,
+                 qkv_params: str="qkv"
+                 ):
+        self._qkv = qkv_params # TODO check values in qkv
+
         self.hidden_size = hidden_size
         self.head_size = head_size
         self.total_num_heads = total_num_heads
@@ -705,13 +710,13 @@ class QKVParallelLinear(ColumnParallelLinear):
         else:
             self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
             self.num_kv_head_replicas = 1
+
+        self._n_heads = {"q": self.num_heads, "k": self.num_kv_heads, "v": total_num_kv_heads}
         input_size = self.hidden_size
-        output_size = (self.num_heads +
-                       2 * self.num_kv_heads) * tp_size * self.head_size
+        output_size = sum(self._n_heads[pname] for pname in qkv_params) * tp_size * self.head_size
         self.output_sizes = [
-            self.num_heads * self.head_size * tp_size,  # q_proj
-            self.num_kv_heads * self.head_size * tp_size,  # k_proj
-            self.num_kv_heads * self.head_size * tp_size,  # v_proj 
+            self._n_heads[pname] * self.head_size * tp_size
+            for pname in qkv_params
         ]
 
         super().__init__(input_size=input_size,
@@ -724,20 +729,28 @@ class QKVParallelLinear(ColumnParallelLinear):
                          prefix=prefix)
 
     def _get_shard_offset_mapping(self, loaded_shard_id: str):
-        shard_offset_mapping = {
-            "q": 0,
-            "k": self.num_heads * self.head_size,
-            "v": (self.num_heads + self.num_kv_heads) * self.head_size,
-            "total": (self.num_heads + 2 * self.num_kv_heads) * self.head_size
-        }
+        # shard_offset_mapping = {
+        #     "q": 0,
+        #     "k": self.num_heads * self.head_size,
+        #     "v": (self.num_heads + self.num_kv_heads) * self.head_size,
+        #     "total": (self.num_heads + 2 * self.num_kv_heads) * self.head_size
+        # }
+        shard_offset_mapping = {self._qkv[0]: 0}
+        for i in range(1, len(self._qkv)):
+            pname = self._qkv[i]
+            # previous n_params + current n_params
+            new_count = shard_offset_mapping[self._qkv[i-1]] + self._n_heads[pname] * self.head_size
+            shard_offset_mapping[pname] = new_count # TODO rename
+
         return shard_offset_mapping.get(loaded_shard_id)
 
     def _get_shard_size_mapping(self, loaded_shard_id: str):
-        shard_size_mapping = {
-            "q": self.num_heads * self.head_size,
-            "k": self.num_kv_heads * self.head_size,
-            "v": self.num_kv_heads * self.head_size,
-        }
+        # shard_size_mapping = {
+            # "q": self.num_heads * self.head_size,
+            # "k": self.num_kv_heads * self.head_size,
+            # "v": self.num_kv_heads * self.head_size,
+        # }
+        shard_size_mapping = {p: nh*self.head_siez for p, nh in self._n_heads.items()}
         return shard_size_mapping.get(loaded_shard_id)
 
     def _load_fused_module_from_checkpoint(self, param: BasevLLMParameter,
@@ -751,6 +764,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         An example of a model with these fused layers:
         https://huggingface.co/microsoft/Phi-3-mini-4k-instruct
         """
+        # TODO 
         shard_offsets = [
             # (shard_id, shard_offset, shard_size)
             ("q", 0, self.total_num_heads * self.head_size),
@@ -812,7 +826,8 @@ class QKVParallelLinear(ColumnParallelLinear):
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
         if is_gguf_weight_type and loaded_shard_id is not None:
-            idx_map = {"q": 0, "k": 1, "v": 2}
+            # idx_map = {"q": 0, "k": 1, "v": 2}
+            idx_map = {p:i for i, p in enumerate(self._qkv)}
             param.data[idx_map[loaded_shard_id]].copy_(loaded_weight)
             param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
             return
@@ -854,6 +869,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                 assert param_data.shape == loaded_weight.shape
                 param_data.copy_(loaded_weight)
                 return
+            # TODO refactor to use shard dictionary 
             shard_offsets = [
                 # (shard_id, shard_offset, shard_size)
                 ("q", 0, self.total_num_heads * self.head_size),
@@ -905,19 +921,19 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         # If output dim is defined, use the default loading process.
         if output_dim is not None:
-            if loaded_shard_id == "q":
-                shard_offset = 0
-                shard_size = self.num_heads * self.head_size
-            elif loaded_shard_id == "k":
-                shard_offset = self.num_heads * self.head_size
-                shard_size = self.num_kv_heads * self.head_size
-            elif loaded_shard_id == "v":
-                shard_offset = (self.num_heads +
-                                self.num_kv_heads) * self.head_size
-                shard_size = self.num_kv_heads * self.head_size
+            shard_offset = self._get_shard_offset_mapping(loaded_shard_id)
+            shard_size = self._n_heads[loaded_shard_id] * self.head_size
+            # if loaded_shard_id == "q":
+            #     shard_size = self.num_heads * self.head_size
+            # elif loaded_shard_id == "k":
+            #     shard_size = self.num_kv_heads * self.head_size
+            # elif loaded_shard_id == "v":
+            #     shard_size = self.num_kv_heads * self.head_size
+
             # Special case for Quantized Weights.
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
+            # TODO
             packed_dim = getattr(param, "packed_dim", None)
             if packed_dim == output_dim:
                 shard_size = shard_size // param.pack_factor
@@ -979,6 +995,53 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
+# TODO somewhere else, maybe in encoder decoder utils
+class QKVCrossParallelLinear(torch.nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        # cross_attn.qkv_proj.weight
+        self.weight = torch.nn.Parameter() # placeholder for loading
+        self.bias = torch.nn.Parameter() # placeholder for loading
+        self.q_proj_decoder = QKVParallelLinear(*args, **kwargs, qkv_params="q")
+        self.kv_proj_encoder = QKVParallelLinear(*args, **kwargs, qkv_params="kv")
+        # self.register_parameter("weight", weight)
+        set_weight_attrs(self.weight, {
+                "output_dim": 0,
+                "weight_loader": self.weight_loader_weight,
+        })
+        set_weight_attrs(self.bias, {
+                "output_dim": 0,
+                "weight_loader": self.weight_loader_bias,
+        })
+
+    def forward(self, decoder_hidden_states, encoder_hidden_states):
+        q, _ = self.q_proj_decoder(decoder_hidden_states)
+        if encoder_hidden_states is None:
+            # KV already cached
+            k = None
+            v = None
+        else:
+            # First forward in decoder, kv cached here.
+            kv_enc, _ = self.kv_proj_encoder(encoder_hidden_states)
+            # Split kv in half
+            k, v = kv_enc.split(kv_enc.shape[-1]//2, dim=-1)
+        return q, k, v
+
+    def weight_loader_weight(self, param: Parameter,
+                      loaded_weight: torch.Tensor,
+                      loaded_shard_id: Optional[str] = None):
+        # NOTE Load the right param, ignore placeholder
+        param = self.q_proj_decoder.weight if loaded_shard_id == "q" else self.kv_proj_encoder.weight
+        param.weight_loader(param, loaded_weight, loaded_shard_id)
+        # delattr(self, "weight") # don't show placeholders after loading the model
+
+    def weight_loader_bias(self, param: Parameter,
+                      loaded_weight: torch.Tensor,
+                      loaded_shard_id: Optional[str] = None):
+        param = self.q_proj_decoder.bias if loaded_shard_id == "q" else self.kv_proj_encoder.bias
+        param.weight_loader(param, loaded_weight, loaded_shard_id)
+        # delattr(self, "bias")
 
 
 class RowParallelLinear(LinearBase):
