@@ -95,7 +95,7 @@ ISO639_1_OTHER_LANGS = {
     "yo": "Yoruba",
     "sa": "Sanskrit",
     "mi": "Māori",
-    "fo": "Faroese",
+    "fo": "Faroese",  # codespell:ignore
     "mt": "Maltese",
     "tg": "Tajik",
     "mg": "Malagasy",
@@ -190,8 +190,8 @@ class OpenAIServingTranscription(OpenAIServing):
         y, sr = librosa.load(io.BytesIO(audio_data))
         if librosa.get_duration(y=y, sr=sr) > MAX_AUDIO_CLIP_DURATION_S:
             raise ValueError(
-                f"Maximum clip duration ({MAX_AUDIO_CLIP_DURATION_S}s)\
-                exceeded.")
+                f"Maximum clip duration ({MAX_AUDIO_CLIP_DURATION_S}s) "
+                "exceeded.")
 
         return {
             "encoder_prompt": {
