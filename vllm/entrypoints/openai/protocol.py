@@ -1268,6 +1268,19 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     choices: List[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
 
+class TranscriptionResponseStreamChoice(OpenAIBaseModel):
+    delta: DeltaMessage
+    finish_reason: Optional[str] = None
+    stop_reason: Optional[Union[int, str]] = None
+
+class TranscriptionStreamResponse(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"trsc-{random_uuid()}")
+    object: Literal["transcription.chunk"] = "transcription.chunk"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    choices: List[TranscriptionResponseStreamChoice]
+    usage: Optional[UsageInfo] = Field(default=None)
+
 
 class BatchRequestInput(OpenAIBaseModel):
     """
@@ -1491,6 +1504,10 @@ class TranscriptionRequest(OpenAIBaseModel):
     """
 
     stream: Optional[bool] = False
+    """Custom field not present in the original OpenAI definition. When set, 
+    it will enable output to be streamed in a similar fashion as the Chat
+    Completion endpoint. 
+    """
 
     # Default sampling parameters for transcription requests.
     _DEFAULT_SAMPLING_PARAMS: dict = {

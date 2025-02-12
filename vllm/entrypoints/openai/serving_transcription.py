@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import io
+from math import ceil
 import time
 from typing import AsyncGenerator, Final, Optional, Union, cast
 
@@ -10,7 +11,7 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
-    ChatCompletionResponseStreamChoice, ChatCompletionStreamResponse,
+    TranscriptionResponseStreamChoice, TranscriptionStreamResponse,
     DeltaMessage, ErrorResponse, RequestResponseMetadata, TranscriptionRequest,
     TranscriptionResponse, TranscriptionResponseVerbose, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
@@ -218,7 +219,7 @@ class OpenAIServingTranscription(OpenAIServing):
             "decoder_prompt":
             f"<|startoftranscript|>{lang_token}<|transcribe|><|notimestamps|>{request.prompt}"
         }
-        return cast(PromptType, prompt)
+        return cast(PromptType, prompt), duration
 
     # TODO (varun) : Make verbose response work !
     async def create_transcription(
@@ -265,7 +266,7 @@ class OpenAIServingTranscription(OpenAIServing):
                     "Currently do not support PromptAdapter for Transcription."
                 )
 
-            prompt = await self._preprocess_transcription(
+            prompt, duration_s = await self._preprocess_transcription(
                 request=request,
                 audio_data=audio_data,
             )
@@ -298,14 +299,12 @@ class OpenAIServingTranscription(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        # TODO(rob): figure out a way to pipe streaming in.
-        print("GEN TYPE", type(self.engine_client))
-        print("STREAM", request.stream)
         if request.stream:
             return self.transcription_stream_generator(request,
                                                        result_generator,
                                                        request_id,
-                                                       request_metadata)
+                                                       request_metadata,
+                                                       duration_s)
 
         # Non-streaming response.
         try:
@@ -324,16 +323,15 @@ class OpenAIServingTranscription(OpenAIServing):
         result_generator: AsyncGenerator[RequestOutput, None],
         request_id: str,
         request_metadata: RequestResponseMetadata,
+        audio_duration_s: float
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         model_name = request.model
-        chunk_object_type: Final = "chat.completion.chunk"
+        chunk_object_type: Final = "transcription.chunk"
         first_iteration = True
 
-        previous_num_tokens = [0]
-        finish_reason_sent = [False]
+        completion_tokens = 0
         num_prompt_tokens = 0
-        num_cached_tokens = None
 
         # all_previous_token_ids: Optional[List[List[int]]]
 
@@ -344,33 +342,29 @@ class OpenAIServingTranscription(OpenAIServing):
         #                                stream_options.continuous_usage_stats
         # else:
         # include_usage, include_continuous_usage = False, False
-        include_usage, include_continuous_usage = False, False
+        include_usage, include_continuous_usage = True, True
 
         try:
             async for res in result_generator:
-                # print(res, "RES\n")
+                # On first result.
                 if res.prompt_token_ids is not None:
-                    # TODO hide prompt='<|startoftranscript|><|en|><|transcribe|><|notimestamps|>', prompt_token_ids=[50258, 50259, 50360, 50364]
-                    num_prompt_tokens = len(res.prompt_token_ids)
-                    # NOTE user can't pass encoder prompts directly -at least
-                    # not to Whisper- as the audio log-mel spectogram is used.
-                    # TODO Here we could return sr * len(audio) / frame_hop
-                    # if res.encoder_prompt_token_ids is not None:
-                    # num_prompt_tokens += len(res.encoder_prompt_token_ids)
+                    # Do not account the 4-tokens "preamble" `<|startoftranscript|>..`
+                    # Could be negative when language token is not specified.
+                    num_prompt_tokens = max(len(res.prompt_token_ids) - 4, 0)
+                    # NOTE(NickLucche) user can't pass encoder prompts directly
+                    # at least not to Whisper. One indicator of the encoder
+                    # amount of processing is the log-mel spectogram length.
+                    num_prompt_tokens = ceil(audio_duration_s * self.model_sr / self.hop_length)
 
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
                 # response (by the try...catch).
                 if first_iteration:
-                    num_cached_tokens = res.num_cached_tokens
                     # Fist delta message.
-                    # TODO keep completion output or have a new type?
-                    choice_data = ChatCompletionResponseStreamChoice(
-                        index=0,
+                    choice_data = TranscriptionResponseStreamChoice(
                         delta=DeltaMessage(content="", ),
-                        logprobs=None,
                         finish_reason=None)
-                    chunk = ChatCompletionStreamResponse(
+                    chunk = TranscriptionStreamResponse(
                         id=request_id,
                         object=chunk_object_type,
                         created=created_time,
@@ -389,98 +383,66 @@ class OpenAIServingTranscription(OpenAIServing):
 
                     first_iteration = False
                 assert not type(res.outputs) == str
-                for output in res.outputs:
-                    # TODO I dont think you can have more than one here
-                    i = output.index
 
-                    if finish_reason_sent[i]:
-                        continue
-                    logprobs = None
+                # Just one output (n=1) supported.
+                output = res.outputs[0]
 
-                    # if not delta_text and not output.token_ids and \
-                    #     not previous_num_tokens[i]:
-                    #     # Chunked prefill case, don't return empty chunks
-                    #     continue
-                    delta_message = DeltaMessage(content=output.text)
+                delta_message = DeltaMessage(content=output.text)
+                completion_tokens += len(output.token_ids)
 
-                    # set the previous values for the next iteration
-                    previous_num_tokens[i] += len(output.token_ids)
+                if output.finish_reason is None:
+                    # Still generating, send delta update.
+                    choice_data = TranscriptionResponseStreamChoice(delta=delta_message)
+                else:
+                    # Model is finished generating.
+                    choice_data = TranscriptionResponseStreamChoice(
+                        delta=delta_message,
+                        finish_reason=output.finish_reason,
+                        stop_reason=output.stop_reason)
 
-                    assert delta_message is not None
 
-                    if output.finish_reason is None:
-                        # Send token-by-token response for each request.n
-                        choice_data = ChatCompletionResponseStreamChoice(
-                            index=i,
-                            delta=delta_message,
-                            logprobs=logprobs,
-                            finish_reason=None)
+                chunk = TranscriptionStreamResponse(
+                    id=request_id,
+                    object=chunk_object_type,
+                    created=created_time,
+                    choices=[choice_data],
+                    model=model_name)
 
-                    # if the model is finished generating
-                    else:
-                        # check to make sure we haven't "forgotten" to stream
-                        #   any tokens that were generated but previously
-                        #   matched by partial json parsing
+                # handle usage stats if requested & if continuous
+                if include_continuous_usage:
+                    chunk.usage = UsageInfo(
+                        prompt_tokens=num_prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        total_tokens=num_prompt_tokens + completion_tokens,
+                    )
 
-                        # Send the finish response for each request.n only once
-                        choice_data = ChatCompletionResponseStreamChoice(
-                            index=i,
-                            delta=delta_message,
-                            logprobs=logprobs,
-                            finish_reason=output.finish_reason,
-                            stop_reason=output.stop_reason)
+                data = chunk.model_dump_json(exclude_unset=True)
+                yield f"data: {data}\n\n"
 
-                        finish_reason_sent[i] = True
+            # Once the final token is handled, if stream_options.include_usage
+            # is sent, send the usage.
+            if include_usage:
+                final_usage = UsageInfo(prompt_tokens=num_prompt_tokens,
+                                        completion_tokens=completion_tokens,
+                                        total_tokens=num_prompt_tokens +
+                                        completion_tokens)
 
-                    chunk = ChatCompletionStreamResponse(
-                        id=request_id,
-                        object=chunk_object_type,
-                        created=created_time,
-                        choices=[choice_data],
-                        model=model_name)
-
-                    # handle usage stats if requested & if continuous
-                    # if include_continuous_usage:
-                    #     completion_tokens = previous_num_tokens[i]
-                    #     chunk.usage = UsageInfo(
-                    #         prompt_tokens=num_prompt_tokens,
-                    #         completion_tokens=completion_tokens,
-                    #         total_tokens=num_prompt_tokens + completion_tokens,
-                    #     )
-
-                    data = chunk.model_dump_json(exclude_unset=True)
-                    yield f"data: {data}\n\n"
-
-            # once the final token is handled, if stream_options.include_usage
-            # is sent, send the usage
-            # if include_usage:
-            #     completion_tokens = sum(previous_num_tokens)
-            #     final_usage = UsageInfo(prompt_tokens=num_prompt_tokens,
-            #                             completion_tokens=completion_tokens,
-            #                             total_tokens=num_prompt_tokens +
-            #                             completion_tokens)
-            #     if self.enable_prompt_tokens_details and num_cached_tokens:
-            #         final_usage.prompt_tokens_details = PromptTokenUsageInfo(
-            #             cached_tokens=num_cached_tokens)
-
-            #     final_usage_chunk = ChatCompletionStreamResponse(
-            #         id=request_id,
-            #         object=chunk_object_type,
-            #         created=created_time,
-            #         choices=[],
-            #         model=model_name,
-            #         usage=final_usage)
-            #     final_usage_data = (final_usage_chunk.model_dump_json(
-            #         exclude_unset=True, exclude_none=True))
-            #     yield f"data: {final_usage_data}\n\n"
+                final_usage_chunk = TranscriptionStreamResponse(
+                    id=request_id,
+                    object=chunk_object_type,
+                    created=created_time,
+                    choices=[],
+                    model=model_name,
+                    usage=final_usage)
+                final_usage_data = (final_usage_chunk.model_dump_json(
+                    exclude_unset=True, exclude_none=True))
+                yield f"data: {final_usage_data}\n\n"
 
             # report to FastAPI middleware aggregate usage across all choices
-            num_completion_tokens = sum(previous_num_tokens)
             request_metadata.final_usage_info = UsageInfo(
                 prompt_tokens=num_prompt_tokens,
-                completion_tokens=num_completion_tokens,
-                total_tokens=num_prompt_tokens + num_completion_tokens)
-            print("Usage", request_metadata.final_usage_info)
+                completion_tokens=completion_tokens,
+                total_tokens=num_prompt_tokens + completion_tokens)
 
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
