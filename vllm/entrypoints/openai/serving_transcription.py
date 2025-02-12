@@ -1,23 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import io
-from typing import AsyncGenerator, Optional, Union, cast
+import time
+from typing import AsyncGenerator, Final, Optional, Union, cast
 
 from fastapi import Request
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (ErrorResponse,
+from vllm.entrypoints.openai.protocol import (ChatCompletionResponseStreamChoice, ChatCompletionStreamResponse, DeltaMessage, ErrorResponse,
                                               RequestResponseMetadata,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
-                                              TranscriptionResponseVerbose)
+                                              TranscriptionResponseVerbose, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import PlaceholderModule
 
 try:
@@ -293,6 +295,11 @@ class OpenAIServingTranscription(OpenAIServing):
             return self.create_error_response(str(e))
 
         # TODO(rob): figure out a way to pipe streaming in.
+        print("GEN TYPE",  type(self.engine_client))
+        print("STREAM", request.stream)
+        if request.stream:
+            return self.transcription_stream_generator(request, result_generator, request_id, request_metadata)
+
         # Non-streaming response.
         try:
             async for op in result_generator:
@@ -303,3 +310,209 @@ class OpenAIServingTranscription(OpenAIServing):
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
+
+    async def transcription_stream_generator(
+            self,
+            request: TranscriptionRequest,
+            result_generator: AsyncGenerator[RequestOutput, None],
+            request_id: str,
+            request_metadata: RequestResponseMetadata,
+        ) -> AsyncGenerator[str, None]:
+        created_time = int(time.time())
+        model_name = request.model
+        chunk_object_type: Final = "chat.completion.chunk"
+        first_iteration = True
+
+        previous_num_tokens = [0]
+        finish_reason_sent = [False]
+        num_prompt_tokens = 0
+        num_cached_tokens = None
+
+
+        # all_previous_token_ids: Optional[List[List[int]]]
+
+        # stream_options = request.stream_options
+        # if stream_options:
+        #     include_usage = stream_options.include_usage
+        #     include_continuous_usage = include_usage and \
+        #                                stream_options.continuous_usage_stats
+        # else:
+            # include_usage, include_continuous_usage = False, False
+        include_usage, include_continuous_usage = False, False
+
+        try:
+            async for res in result_generator:
+                print(res, "RES\n")
+                if res.prompt_token_ids is not None:
+                    # TODO hide prompt='<|startoftranscript|><|en|><|transcribe|><|notimestamps|>', prompt_token_ids=[50258, 50259, 50360, 50364]
+                    num_prompt_tokens = len(res.prompt_token_ids)
+                    # these are all preallocated to fixed size
+                    # if res.encoder_prompt_token_ids is not None:
+                        # num_prompt_tokens += len(res.encoder_prompt_token_ids)
+
+                # We need to do it here, because if there are exceptions in
+                # the result_generator, it needs to be sent as the FIRST
+                # response (by the try...catch).
+                if first_iteration:
+                    num_cached_tokens = res.num_cached_tokens
+                    # Fist delta message.
+                    choice_data = ChatCompletionResponseStreamChoice(
+                        index=0,
+                        delta=DeltaMessage(
+                            content="",
+                        ),
+                        logprobs=None,
+                        finish_reason=None)
+                    chunk = ChatCompletionStreamResponse(
+                        id=request_id,
+                        object=chunk_object_type,
+                        created=created_time,
+                        choices=[choice_data],
+                        model=model_name)
+
+                    # if continuous usage stats are requested, add it
+                    if include_continuous_usage:
+                        chunk.usage = UsageInfo(
+                            prompt_tokens=num_prompt_tokens,
+                            completion_tokens=0,
+                            total_tokens=num_prompt_tokens)
+
+                    data = chunk.model_dump_json(exclude_unset=True)
+                    yield f"data: {data}\n\n"
+
+                    # Send response to echo the input portion of the
+                    # last message
+                    # if request.echo:
+                    #     last_msg_content: Union[str, List[Dict[str, str]]] = ""
+                    #     if conversation and "content" in conversation[
+                    #             -1] and conversation[-1].get("role") == role:
+                    #         last_msg_content = conversation[-1]["content"] or ""
+
+                    #     if last_msg_content:
+                    #         for i in range(num_choices):
+                    #             choice_data = (
+                    #                 ChatCompletionResponseStreamChoice(
+                    #                     index=i,
+                    #                     delta=DeltaMessage(
+                    #                         content=last_msg_content),
+                    #                     logprobs=None,
+                    #                     finish_reason=None))
+                    #             chunk = ChatCompletionStreamResponse(
+                    #                 id=request_id,
+                    #                 object=chunk_object_type,
+                    #                 created=created_time,
+                    #                 choices=[choice_data],
+                    #                 model=model_name)
+                    #             if include_continuous_usage:
+                    #                 chunk.usage = UsageInfo(
+                    #                     prompt_tokens=num_prompt_tokens,
+                    #                     completion_tokens=0,
+                    #                     total_tokens=num_prompt_tokens)
+
+                    #             data = chunk.model_dump_json(
+                    #                 exclude_unset=True)
+                    #             yield f"data: {data}\n\n"
+                    first_iteration = False
+                print(res.outputs)
+                assert not type(res.outputs) == str
+                for output in res.outputs:
+                    # TODO I dont think you can have more than one here
+                    i = output.index
+
+                    if finish_reason_sent[i]:
+                        continue
+                    logprobs = None
+
+                    # if not delta_text and not output.token_ids and \
+                    #     not previous_num_tokens[i]:
+                    #     # Chunked prefill case, don't return empty chunks
+                    #     continue
+                    print("DELTA", output.text)
+                    delta_message = DeltaMessage(content=output.text)
+
+                    # set the previous values for the next iteration
+                    previous_num_tokens[i] += len(output.token_ids)
+
+                    assert delta_message is not None
+
+                    if output.finish_reason is None:
+                        # Send token-by-token response for each request.n
+                        choice_data = ChatCompletionResponseStreamChoice(
+                            index=i,
+                            delta=delta_message,
+                            logprobs=logprobs,
+                            finish_reason=None)
+
+                    # if the model is finished generating
+                    else:
+                        # check to make sure we haven't "forgotten" to stream
+                        #   any tokens that were generated but previously
+                        #   matched by partial json parsing
+
+                        # Send the finish response for each request.n only once
+                        choice_data = ChatCompletionResponseStreamChoice(
+                            index=i,
+                            delta=delta_message,
+                            logprobs=logprobs,
+                            finish_reason=output.finish_reason,
+                            stop_reason=output.stop_reason)
+
+                        finish_reason_sent[i] = True
+
+                    chunk = ChatCompletionStreamResponse(
+                        id=request_id,
+                        object=chunk_object_type,
+                        created=created_time,
+                        choices=[choice_data],
+                        model=model_name)
+
+                    # handle usage stats if requested & if continuous
+                    # if include_continuous_usage:
+                    #     completion_tokens = previous_num_tokens[i]
+                    #     chunk.usage = UsageInfo(
+                    #         prompt_tokens=num_prompt_tokens,
+                    #         completion_tokens=completion_tokens,
+                    #         total_tokens=num_prompt_tokens + completion_tokens,
+                    #     )
+
+                    data = chunk.model_dump_json(exclude_unset=True)
+                    yield f"data: {data}\n\n"
+
+            # once the final token is handled, if stream_options.include_usage
+            # is sent, send the usage
+            # if include_usage:
+            #     completion_tokens = sum(previous_num_tokens)
+            #     final_usage = UsageInfo(prompt_tokens=num_prompt_tokens,
+            #                             completion_tokens=completion_tokens,
+            #                             total_tokens=num_prompt_tokens +
+            #                             completion_tokens)
+            #     if self.enable_prompt_tokens_details and num_cached_tokens:
+            #         final_usage.prompt_tokens_details = PromptTokenUsageInfo(
+            #             cached_tokens=num_cached_tokens)
+
+            #     final_usage_chunk = ChatCompletionStreamResponse(
+            #         id=request_id,
+            #         object=chunk_object_type,
+            #         created=created_time,
+            #         choices=[],
+            #         model=model_name,
+            #         usage=final_usage)
+            #     final_usage_data = (final_usage_chunk.model_dump_json(
+            #         exclude_unset=True, exclude_none=True))
+            #     yield f"data: {final_usage_data}\n\n"
+
+            # report to FastAPI middleware aggregate usage across all choices
+            num_completion_tokens = sum(previous_num_tokens)
+            request_metadata.final_usage_info = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                completion_tokens=num_completion_tokens,
+                total_tokens=num_prompt_tokens + num_completion_tokens)
+            print("Usage", request_metadata.final_usage_info)
+
+        except Exception as e:
+            # TODO: Use a vllm-specific Validation Error
+            logger.exception("Error in chat completion stream generator.")
+            data = self.create_streaming_error_response(str(e))
+            yield f"data: {data}\n\n"
+        # Send the final done message after all response.n are finished
+        yield "data: [DONE]\n\n"

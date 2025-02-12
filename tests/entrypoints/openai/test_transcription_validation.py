@@ -99,3 +99,20 @@ async def test_non_asr_model(winning_call):
                                                        temperature=0.0)
         assert res.code == 400 and res.text == ""
         assert res.message == "The model does not support Transcriptions API"
+
+@pytest.mark.asyncio
+async def test_streaming_response(winning_call):
+    model_name = "openai/whisper-large-v3-turbo"
+    server_args = ["--enforce-eager"]
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        # TODO I think issue is in client not setting up for stream mode!!
+        res = await client.audio.transcriptions.create(model=model_name,
+                                                       file=winning_call,
+                                                       language="en",
+                                                       temperature=0.0,
+                                                       extra_body=dict(stream=True)
+                                                       )
+        # Reconstruct from chunks and validate 
+        for chunk in res:
+            print(chunk)

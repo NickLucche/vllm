@@ -16,8 +16,12 @@ client = OpenAI(
 with open(str(mary_had_lamb), "rb") as f:
     transcription = client.audio.transcriptions.create(
         file=f,
-        model="openai/whisper-large-v3",
+        # model="openai/whisper-large-v3",
+        model="openai/whisper-small",
         language="en",
-        response_format="text",
+        # response_format="text",
+        extra_body=dict(stream=True),
         temperature=0.0)
-    print("transcription result:", transcription)
+    # print("transcription result:", transcription)
+    for chunk in transcription:
+        print(chunk, '\n')

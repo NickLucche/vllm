@@ -1490,6 +1490,8 @@ class TranscriptionRequest(OpenAIBaseModel):
     timestamps incurs additional latency.
     """
 
+    stream: Optional[bool] = False
+
     # Default sampling parameters for transcription requests.
     _DEFAULT_SAMPLING_PARAMS: dict = {
         "temperature": 0,
@@ -1510,7 +1512,10 @@ class TranscriptionRequest(OpenAIBaseModel):
                 "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
 
         return SamplingParams.from_optional(temperature=temperature,
-                                            max_tokens=max_tokens)
+                                            max_tokens=max_tokens,
+                                            output_kind=RequestOutputKind.DELTA
+                                              if self.stream \
+                                                else RequestOutputKind.FINAL_ONLY,)
 
 
 # Transcription response objects
