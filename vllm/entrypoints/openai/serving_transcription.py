@@ -9,11 +9,10 @@ from fastapi import Request
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (ChatCompletionResponseStreamChoice, ChatCompletionStreamResponse, DeltaMessage, ErrorResponse,
-                                              RequestResponseMetadata,
-                                              TranscriptionRequest,
-                                              TranscriptionResponse,
-                                              TranscriptionResponseVerbose, UsageInfo)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionResponseStreamChoice, ChatCompletionStreamResponse,
+    DeltaMessage, ErrorResponse, RequestResponseMetadata, TranscriptionRequest,
+    TranscriptionResponse, TranscriptionResponseVerbose, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
@@ -240,8 +239,7 @@ class OpenAIServingTranscription(OpenAIServing):
             return self.create_error_response(
                 "Currently only support response_format `text` or `json`")
 
-        # TODO cmpl->transcription?
-        request_id = f"cmpl-{self._base_request_id(raw_request)}"
+        request_id = f"trsc-{self._base_request_id(raw_request)}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
@@ -295,10 +293,13 @@ class OpenAIServingTranscription(OpenAIServing):
             return self.create_error_response(str(e))
 
         # TODO(rob): figure out a way to pipe streaming in.
-        print("GEN TYPE",  type(self.engine_client))
+        print("GEN TYPE", type(self.engine_client))
         print("STREAM", request.stream)
         if request.stream:
-            return self.transcription_stream_generator(request, result_generator, request_id, request_metadata)
+            return self.transcription_stream_generator(request,
+                                                       result_generator,
+                                                       request_id,
+                                                       request_metadata)
 
         # Non-streaming response.
         try:
@@ -312,12 +313,12 @@ class OpenAIServingTranscription(OpenAIServing):
             return self.create_error_response(str(e))
 
     async def transcription_stream_generator(
-            self,
-            request: TranscriptionRequest,
-            result_generator: AsyncGenerator[RequestOutput, None],
-            request_id: str,
-            request_metadata: RequestResponseMetadata,
-        ) -> AsyncGenerator[str, None]:
+        self,
+        request: TranscriptionRequest,
+        result_generator: AsyncGenerator[RequestOutput, None],
+        request_id: str,
+        request_metadata: RequestResponseMetadata,
+    ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         model_name = request.model
         chunk_object_type: Final = "chat.completion.chunk"
@@ -328,7 +329,6 @@ class OpenAIServingTranscription(OpenAIServing):
         num_prompt_tokens = 0
         num_cached_tokens = None
 
-
         # all_previous_token_ids: Optional[List[List[int]]]
 
         # stream_options = request.stream_options
@@ -337,18 +337,20 @@ class OpenAIServingTranscription(OpenAIServing):
         #     include_continuous_usage = include_usage and \
         #                                stream_options.continuous_usage_stats
         # else:
-            # include_usage, include_continuous_usage = False, False
+        # include_usage, include_continuous_usage = False, False
         include_usage, include_continuous_usage = False, False
 
         try:
             async for res in result_generator:
-                print(res, "RES\n")
+                # print(res, "RES\n")
                 if res.prompt_token_ids is not None:
                     # TODO hide prompt='<|startoftranscript|><|en|><|transcribe|><|notimestamps|>', prompt_token_ids=[50258, 50259, 50360, 50364]
                     num_prompt_tokens = len(res.prompt_token_ids)
-                    # these are all preallocated to fixed size
+                    # NOTE user can't pass encoder prompts directly -at least
+                    # not to Whisper- as the audio log-mel spectogram is used.
+                    # TODO Here we could return sr * len(audio) / frame_hop
                     # if res.encoder_prompt_token_ids is not None:
-                        # num_prompt_tokens += len(res.encoder_prompt_token_ids)
+                    # num_prompt_tokens += len(res.encoder_prompt_token_ids)
 
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
@@ -356,11 +358,10 @@ class OpenAIServingTranscription(OpenAIServing):
                 if first_iteration:
                     num_cached_tokens = res.num_cached_tokens
                     # Fist delta message.
+                    # TODO keep completion output or have a new type?
                     choice_data = ChatCompletionResponseStreamChoice(
                         index=0,
-                        delta=DeltaMessage(
-                            content="",
-                        ),
+                        delta=DeltaMessage(content="", ),
                         logprobs=None,
                         finish_reason=None)
                     chunk = ChatCompletionStreamResponse(
@@ -380,40 +381,7 @@ class OpenAIServingTranscription(OpenAIServing):
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
 
-                    # Send response to echo the input portion of the
-                    # last message
-                    # if request.echo:
-                    #     last_msg_content: Union[str, List[Dict[str, str]]] = ""
-                    #     if conversation and "content" in conversation[
-                    #             -1] and conversation[-1].get("role") == role:
-                    #         last_msg_content = conversation[-1]["content"] or ""
-
-                    #     if last_msg_content:
-                    #         for i in range(num_choices):
-                    #             choice_data = (
-                    #                 ChatCompletionResponseStreamChoice(
-                    #                     index=i,
-                    #                     delta=DeltaMessage(
-                    #                         content=last_msg_content),
-                    #                     logprobs=None,
-                    #                     finish_reason=None))
-                    #             chunk = ChatCompletionStreamResponse(
-                    #                 id=request_id,
-                    #                 object=chunk_object_type,
-                    #                 created=created_time,
-                    #                 choices=[choice_data],
-                    #                 model=model_name)
-                    #             if include_continuous_usage:
-                    #                 chunk.usage = UsageInfo(
-                    #                     prompt_tokens=num_prompt_tokens,
-                    #                     completion_tokens=0,
-                    #                     total_tokens=num_prompt_tokens)
-
-                    #             data = chunk.model_dump_json(
-                    #                 exclude_unset=True)
-                    #             yield f"data: {data}\n\n"
                     first_iteration = False
-                print(res.outputs)
                 assert not type(res.outputs) == str
                 for output in res.outputs:
                     # TODO I dont think you can have more than one here
@@ -427,7 +395,6 @@ class OpenAIServingTranscription(OpenAIServing):
                     #     not previous_num_tokens[i]:
                     #     # Chunked prefill case, don't return empty chunks
                     #     continue
-                    print("DELTA", output.text)
                     delta_message = DeltaMessage(content=output.text)
 
                     # set the previous values for the next iteration
