@@ -20,6 +20,7 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import PlaceholderModule
+from vllm.transformers_utils.processor import cached_get_processor
 
 try:
     import librosa
@@ -140,8 +141,6 @@ ISO639_1_OTHER_LANGS = {
 # As per https://platform.openai.com/docs/guides/speech-to-text#overview.
 # TODO configurable
 MAX_AUDIO_CLIP_FILESIZE_MB = 25
-# TODO get from processor.feature_extractor.chunk_length
-MAX_AUDIO_CLIP_DURATION_S = 30
 
 
 class OpenAIServingTranscription(OpenAIServing):
@@ -162,6 +161,11 @@ class OpenAIServingTranscription(OpenAIServing):
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
 
         diff_sampling_param = self.model_config.get_diff_sampling_param()
+        processor = cached_get_processor(model_config.model)
+        self.max_audio_clip_s = processor.feature_extractor.chunk_length
+        self.model_sr = processor.feature_extractor.sampling_rate
+        self.hop_length = processor.feature_extractor.hop_length
+
         if diff_sampling_param:
             logger.info(
                 "Overwriting default completion sampling param with: %s",
@@ -197,9 +201,11 @@ class OpenAIServingTranscription(OpenAIServing):
 
         with io.BytesIO(audio_data) as bytes_:
             y, sr = librosa.load(bytes_)
-        if librosa.get_duration(y=y, sr=sr) > MAX_AUDIO_CLIP_DURATION_S:
+
+        duration = librosa.get_duration(y=y, sr=sr)
+        if duration > self.max_audio_clip_s:
             raise ValueError(
-                f"Maximum clip duration ({MAX_AUDIO_CLIP_DURATION_S}s) "
+                f"Maximum clip duration ({self.max_audio_clip_s}s) "
                 "exceeded.")
 
         prompt = {
