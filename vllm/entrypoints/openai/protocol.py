@@ -1508,6 +1508,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     it will enable output to be streamed in a similar fashion as the Chat
     Completion endpoint. 
     """
+    stream_options: Optional[StreamOptions] = None
 
     # Default sampling parameters for transcription requests.
     _DEFAULT_SAMPLING_PARAMS: dict = {
@@ -1533,6 +1534,15 @@ class TranscriptionRequest(OpenAIBaseModel):
                                             output_kind=RequestOutputKind.DELTA
                                               if self.stream \
                                                 else RequestOutputKind.FINAL_ONLY,)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_stream_options(cls, data):
+        if data.get("stream_options") and not data.get("stream"):
+            raise ValueError(
+                "Stream options can only be defined when `stream=True`.")
+
+        return data
 
 
 # Transcription response objects

@@ -333,16 +333,14 @@ class OpenAIServingTranscription(OpenAIServing):
         completion_tokens = 0
         num_prompt_tokens = 0
 
-        # all_previous_token_ids: Optional[List[List[int]]]
-
-        # stream_options = request.stream_options
-        # if stream_options:
-        #     include_usage = stream_options.include_usage
-        #     include_continuous_usage = include_usage and \
-        #                                stream_options.continuous_usage_stats
-        # else:
-        # include_usage, include_continuous_usage = False, False
-        include_usage, include_continuous_usage = True, True
+        # TODO test
+        stream_options = request.stream_options
+        if stream_options:
+            include_usage = stream_options.include_usage
+            include_continuous_usage = include_usage and \
+                                       stream_options.continuous_usage_stats
+        else:
+            include_usage, include_continuous_usage = False, False
 
         try:
             async for res in result_generator:
