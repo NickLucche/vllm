@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import io
-from math import ceil
 import time
+from math import ceil
 from typing import AsyncGenerator, Final, Optional, Union, cast
 
 from fastapi import Request
@@ -11,17 +11,17 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
-    TranscriptionResponseStreamChoice, TranscriptionStreamResponse,
     DeltaMessage, ErrorResponse, RequestResponseMetadata, TranscriptionRequest,
-    TranscriptionResponse, TranscriptionResponseVerbose, UsageInfo)
+    TranscriptionResponse, TranscriptionResponseStreamChoice,
+    TranscriptionResponseVerbose, TranscriptionStreamResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import PlaceholderModule
-from vllm.transformers_utils.processor import cached_get_processor
 
 try:
     import librosa
@@ -318,13 +318,10 @@ class OpenAIServingTranscription(OpenAIServing):
             return self.create_error_response(str(e))
 
     async def transcription_stream_generator(
-        self,
-        request: TranscriptionRequest,
-        result_generator: AsyncGenerator[RequestOutput, None],
-        request_id: str,
-        request_metadata: RequestResponseMetadata,
-        audio_duration_s: float
-    ) -> AsyncGenerator[str, None]:
+            self, request: TranscriptionRequest,
+            result_generator: AsyncGenerator[RequestOutput, None],
+            request_id: str, request_metadata: RequestResponseMetadata,
+            audio_duration_s: float) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         model_name = request.model
         chunk_object_type: Final = "transcription.chunk"
@@ -352,7 +349,8 @@ class OpenAIServingTranscription(OpenAIServing):
                     # NOTE(NickLucche) user can't pass encoder prompts directly
                     # at least not to Whisper. One indicator of the encoder
                     # amount of processing is the log-mel spectogram length.
-                    num_prompt_tokens = ceil(audio_duration_s * self.model_sr / self.hop_length)
+                    num_prompt_tokens = ceil(audio_duration_s * self.model_sr /
+                                             self.hop_length)
 
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
@@ -360,8 +358,7 @@ class OpenAIServingTranscription(OpenAIServing):
                 if first_iteration:
                     # Fist delta message.
                     choice_data = TranscriptionResponseStreamChoice(
-                        delta=DeltaMessage(content="", ),
-                        finish_reason=None)
+                        delta=DeltaMessage(content="", ), finish_reason=None)
                     chunk = TranscriptionStreamResponse(
                         id=request_id,
                         object=chunk_object_type,
@@ -390,7 +387,8 @@ class OpenAIServingTranscription(OpenAIServing):
 
                 if output.finish_reason is None:
                     # Still generating, send delta update.
-                    choice_data = TranscriptionResponseStreamChoice(delta=delta_message)
+                    choice_data = TranscriptionResponseStreamChoice(
+                        delta=delta_message)
                 else:
                     # Model is finished generating.
                     choice_data = TranscriptionResponseStreamChoice(
@@ -398,13 +396,11 @@ class OpenAIServingTranscription(OpenAIServing):
                         finish_reason=output.finish_reason,
                         stop_reason=output.stop_reason)
 
-
-                chunk = TranscriptionStreamResponse(
-                    id=request_id,
-                    object=chunk_object_type,
-                    created=created_time,
-                    choices=[choice_data],
-                    model=model_name)
+                chunk = TranscriptionStreamResponse(id=request_id,
+                                                    object=chunk_object_type,
+                                                    created=created_time,
+                                                    choices=[choice_data],
+                                                    model=model_name)
 
                 # handle usage stats if requested & if continuous
                 if include_continuous_usage:

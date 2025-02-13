@@ -1268,10 +1268,12 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     choices: List[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
 
+
 class TranscriptionResponseStreamChoice(OpenAIBaseModel):
     delta: DeltaMessage
     finish_reason: Optional[str] = None
     stop_reason: Optional[Union[int, str]] = None
+
 
 class TranscriptionStreamResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"trsc-{random_uuid()}")
