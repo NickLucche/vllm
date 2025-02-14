@@ -20,7 +20,6 @@ from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.processor import cached_get_processor
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import PlaceholderModule
 
 try:
@@ -300,11 +299,13 @@ class OpenAIServingTranscription(OpenAIServing):
             return self.create_error_response(str(e))
 
         if request.stream:
+            print("STREAMING\n\n")
             return self.transcription_stream_generator(request,
                                                        result_generator,
                                                        request_id,
                                                        request_metadata,
                                                        duration_s)
+        print("NOT STREAMING\n\n")
 
         # Non-streaming response.
         try:
@@ -343,7 +344,7 @@ class OpenAIServingTranscription(OpenAIServing):
             async for res in result_generator:
                 # On first result.
                 if res.prompt_token_ids is not None:
-                    # Do not account the 4-tokens "preamble" `<|startoftranscript|>..`
+                    # Do not account the 4-tokens `<|startoftranscript|>..`
                     # Could be negative when language token is not specified.
                     num_prompt_tokens = max(len(res.prompt_token_ids) - 4, 0)
                     # NOTE(NickLucche) user can't pass encoder prompts directly
@@ -377,7 +378,6 @@ class OpenAIServingTranscription(OpenAIServing):
                     yield f"data: {data}\n\n"
 
                     first_iteration = False
-                assert not type(res.outputs) == str
 
                 # Just one output (n=1) supported.
                 output = res.outputs[0]

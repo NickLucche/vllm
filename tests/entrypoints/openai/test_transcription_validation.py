@@ -3,12 +3,14 @@
 # imports for guided decoding tests
 import io
 import json
+from unittest.mock import patch
 
 import librosa
 import numpy as np
 import openai
 import pytest
 import soundfile as sf
+from openai._base_client import AsyncAPIClient
 
 from vllm.assets.audio import AudioAsset
 
@@ -100,19 +102,40 @@ async def test_non_asr_model(winning_call):
         assert res.code == 400 and res.text == ""
         assert res.message == "The model does not support Transcriptions API"
 
+
 @pytest.mark.asyncio
 async def test_streaming_response(winning_call):
-    model_name = "openai/whisper-large-v3-turbo"
+    model_name = "openai/whisper-small"
     server_args = ["--enforce-eager"]
+    transcription = ""
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
-        # TODO I think issue is in client not setting up for stream mode!!
-        res = await client.audio.transcriptions.create(model=model_name,
-                                                       file=winning_call,
-                                                       language="en",
-                                                       temperature=0.0,
-                                                       extra_body=dict(stream=True)
-                                                       )
-        # Reconstruct from chunks and validate 
-        for chunk in res:
-            print(chunk)
+        res_no_stream = await client.audio.transcriptions.create(
+            model=model_name,
+            file=winning_call,
+            response_format="json",
+            language="en",
+            temperature=0.0)
+        # Unfortunately this only works when the openai client is patched
+        # to use streaming mode, not exposed in the transcription api.
+        original_post = AsyncAPIClient.post
+
+        async def post_with_stream(*args, **kwargs):
+            kwargs['stream'] = True
+            return await original_post(*args, **kwargs)
+
+        with patch.object(AsyncAPIClient, "post", new=post_with_stream):
+            client = remote_server.get_async_client()
+            res = await client.audio.transcriptions.create(
+                model=model_name,
+                file=winning_call,
+                language="en",
+                temperature=0.0,
+                extra_body=dict(stream=True))
+            # Reconstruct from chunks and validate
+            async for chunk in res:
+                # just a chunk
+                text = chunk.choices[0]['delta']['content']
+                transcription += text
+
+        assert transcription == res_no_stream.text
