@@ -139,3 +139,35 @@ async def test_streaming_response(winning_call):
                 transcription += text
 
         assert transcription == res_no_stream.text
+
+
+@pytest.mark.asyncio
+async def test_stream_options(winning_call):
+    model_name = "openai/whisper-small"
+    server_args = ["--enforce-eager"]
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        original_post = AsyncAPIClient.post
+
+        async def post_with_stream(*args, **kwargs):
+            kwargs['stream'] = True
+            return await original_post(*args, **kwargs)
+
+        with patch.object(AsyncAPIClient, "post", new=post_with_stream):
+            client = remote_server.get_async_client()
+            res = await client.audio.transcriptions.create(
+                model=model_name,
+                file=winning_call,
+                language="en",
+                temperature=0.0,
+                extra_body=dict(stream=True,
+                                stream_include_usage=True,
+                                stream_continuous_usage_stats=True))
+            final = False
+            continuous = True
+            async for chunk in res:
+                if not len(chunk.choices):
+                    # final usage sent
+                    final = True
+                else:
+                    continuous = continuous and hasattr(chunk, 'usage')
+            assert final and continuous

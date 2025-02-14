@@ -299,14 +299,11 @@ class OpenAIServingTranscription(OpenAIServing):
             return self.create_error_response(str(e))
 
         if request.stream:
-            print("STREAMING\n\n")
             return self.transcription_stream_generator(request,
                                                        result_generator,
                                                        request_id,
                                                        request_metadata,
                                                        duration_s)
-        print("NOT STREAMING\n\n")
-
         # Non-streaming response.
         try:
             async for op in result_generator:
@@ -331,14 +328,11 @@ class OpenAIServingTranscription(OpenAIServing):
         completion_tokens = 0
         num_prompt_tokens = 0
 
-        # TODO test
-        stream_options = request.stream_options
-        if stream_options:
-            include_usage = stream_options.include_usage
-            include_continuous_usage = include_usage and \
-                                       stream_options.continuous_usage_stats
-        else:
-            include_usage, include_continuous_usage = False, False
+        include_usage = request.stream_include_usage \
+            if request.stream_include_usage else False
+        include_continuous_usage = request.stream_continuous_usage_stats\
+              if include_usage and request.stream_continuous_usage_stats\
+                else False
 
         try:
             async for res in result_generator:
