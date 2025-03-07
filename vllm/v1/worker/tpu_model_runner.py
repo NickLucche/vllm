@@ -20,6 +20,7 @@ from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
@@ -152,8 +153,6 @@ class TPUModelRunner:
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-        # TODO: Support M-RoPE (e.g, Qwen2-VL)
-        assert not self.uses_mrope, "TPU does not support M-RoPE yet."
 
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
@@ -180,6 +179,24 @@ class TPUModelRunner:
             pin_memory=self.pin_memory,
             vocab_size=model_config.get_vocab_size(),
         )
+
+        # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+        if self.uses_mrope:
+            # NOTE: `mrope_positions` is implemented with one additional dummy
+            # position on purpose to make it non-contiguous so that it can work
+            # with torch compile.
+            # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
+
+            # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
+            # the modality of inputs. For text-only inputs, each dimension has
+            # identical position IDs, making M-RoPE functionally equivalent to
+            # 1D-RoPE.
+            # See page 5 of https://arxiv.org/abs/2409.12191
+            self.mrope_positions_cpu = torch.zeros(
+                (3, self.max_num_tokens + 1),
+                dtype=torch.int64,
+                device="cpu",
+                pin_memory=self.pin_memory)
 
         # Cached torch/numpy tensor
         # The pytorch tensor and numpy array share the same buffer.
@@ -354,6 +371,34 @@ class TPUModelRunner:
                 lora_request=new_req_data.lora_request,
             )
 
+            # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+            if self.uses_mrope:
+                image_grid_thw = []
+                video_grid_thw = []
+                second_per_grid_ts = []
+                for mm_input in self.requests[req_id].mm_inputs:
+                    if mm_input.get("image_grid_thw") is not None:
+                        image_grid_thw.extend(
+                            mm_input["image_grid_thw"].tolist())
+                    if mm_input.get("video_grid_thw") is not None:
+                        video_grid_thw.extend(
+                            mm_input["video_grid_thw"].tolist())
+                    if mm_input.get("second_per_grid_ts") is not None:
+                        second_per_grid_ts.extend(
+                            mm_input["second_per_grid_ts"])
+
+                hf_config = self.model_config.hf_config
+
+                self.requests[req_id].mrope_positions, \
+                    self.requests[req_id].mrope_position_delta = \
+                    MRotaryEmbedding.get_input_positions_tensor(
+                        self.requests[req_id].prompt_token_ids,
+                        hf_config=hf_config,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        second_per_grid_ts=second_per_grid_ts,
+                    )
+
             req_ids_to_add.append(req_id)
 
         # Update the states of the running/resumed requests.
@@ -489,6 +534,11 @@ class TPUModelRunner:
                arange,
                out=positions_np)
 
+        # Calculate M-RoPE positions.
+        # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+        if self.uses_mrope:
+            self._calc_mrope_positions(scheduler_output)
+
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
@@ -542,9 +592,17 @@ class TPUModelRunner:
         self.input_ids = self.input_ids_cpu[:
                                             padded_total_num_scheduled_tokens].to(
                                                 self.device)
-        self.position_ids = self.positions_cpu[:
-                                               padded_total_num_scheduled_tokens].to(
-                                                   self.device)
+        if self.uses_mrope:
+            # TODO zero out
+            # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+            self.mrope_positions = self.mrope_positions_cpu[:, :
+                                                            padded_total_num_scheduled_tokens].to(
+                                                                self.device)
+        else:
+            # Common case (1D positions)
+            self.positions = self.positions_cpu[:
+                                                padded_total_num_scheduled_tokens].to(
+                                                    self.device)
         self.slot_mapping_cpu[total_num_scheduled_tokens:] = _PAD_SLOT_ID
         slot_mapping = self.slot_mapping_cpu[:
                                              padded_total_num_scheduled_tokens].to(
@@ -731,6 +789,58 @@ class TPUModelRunner:
             # then the embedding layer is not included in the CUDA graph.
             return input_ids, None
 
+    def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
+        mrope_pos_ptr = 0
+        for index, req_id in enumerate(self.input_batch.req_ids):
+            req = self.requests[req_id]
+            assert req.mrope_positions is not None
+
+            num_computed_tokens = \
+                self.input_batch.num_computed_tokens_cpu[index]
+            num_scheduled_tokens = \
+                scheduler_output.num_scheduled_tokens[req_id]
+            num_prompt_tokens = len(req.prompt_token_ids)
+
+            if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
+                prompt_part_len = max(0,
+                                      num_prompt_tokens - num_computed_tokens)
+                completion_part_len = max(
+                    0, num_scheduled_tokens - prompt_part_len)
+            else:
+                prompt_part_len = num_scheduled_tokens
+                completion_part_len = 0
+
+            assert num_scheduled_tokens == prompt_part_len + completion_part_len
+
+            if prompt_part_len > 0:
+                # prompt's mrope_positions are pre-computed
+                dst_start = mrope_pos_ptr
+                dst_end = mrope_pos_ptr + prompt_part_len
+                src_start = num_computed_tokens
+                src_end = num_computed_tokens + prompt_part_len
+
+                self.mrope_positions_cpu[:, dst_start:dst_end] = \
+                    req.mrope_positions[:,src_start:src_end]
+
+                mrope_pos_ptr += prompt_part_len
+
+            if completion_part_len > 0:
+                # compute completion's mrope_positions on-the-fly
+                dst_start = mrope_pos_ptr
+                dst_end = mrope_pos_ptr + completion_part_len
+
+                self.mrope_positions_cpu[:, dst_start:dst_end] = \
+                    MRotaryEmbedding.get_next_input_positions_tensor(
+                        req.mrope_position_delta,
+                        context_len=num_computed_tokens +
+                        prompt_part_len,
+                        seq_len=num_computed_tokens +
+                        prompt_part_len +
+                        completion_part_len,
+                    )
+
+                mrope_pos_ptr += completion_part_len
+
     @torch.no_grad()
     def execute_model(
         self,
@@ -757,11 +867,13 @@ class TPUModelRunner:
             self.input_ids, mm_embeds)
         xm.mark_step()
         num_reqs = self.input_batch.num_reqs
+
+        positions = self.mrope_positions if self.uses_mrope else self.positions
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
                 input_ids=input_ids,
-                positions=self.position_ids,
+                positions=positions,
                 inputs_embeds=inputs_embeds,
             )
         hidden_states = self.select_hidden_states(hidden_states,
@@ -888,10 +1000,14 @@ class TPUModelRunner:
                                     dtype=torch.int32,
                                     device=self.device)
             inputs_embeds = None
-        actual_num_reqs = min(num_tokens, self.max_num_reqs)
-        position_ids = torch.zeros(num_tokens,
-                                   dtype=torch.int32,
-                                   device=self.device)
+        if self.uses_mrope:
+            positions = torch.zeros((3, num_tokens),
+                                    dtype=torch.int64,
+                                    device=self.device)
+        else:
+            positions = torch.zeros(num_tokens,
+                                    dtype=torch.int32,
+                                    device=self.device)
         slot_mapping = torch.zeros(num_tokens,
                                    dtype=torch.int64,
                                    device=self.device)
@@ -907,6 +1023,7 @@ class TPUModelRunner:
         context_lens = torch.ones((self.max_num_reqs, ),
                                   dtype=torch.int32,
                                   device=self.device)
+        actual_num_reqs = min(num_tokens, self.max_num_reqs)
         num_seqs = torch.tensor([actual_num_reqs],
                                 dtype=torch.int32,
                                 device=self.device)
@@ -922,12 +1039,15 @@ class TPUModelRunner:
             torch._dynamo.mark_dynamic(inputs_embeds, 0)
         else:
             torch._dynamo.mark_dynamic(input_ids, 0)
-        torch._dynamo.mark_dynamic(position_ids, 0)
+        if self.uses_mrope:
+            torch._dynamo.mark_dynamic(positions, 1)
+        else:
+            torch._dynamo.mark_dynamic(positions, 0)
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             out = self.model(input_ids=input_ids,
-                             positions=position_ids,
+                             positions=positions,
                              inputs_embeds=inputs_embeds)
         self._hidden_states_dtype = out.dtype
 
