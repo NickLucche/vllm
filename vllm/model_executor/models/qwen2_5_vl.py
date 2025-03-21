@@ -226,7 +226,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         # Detect attention implementation.
         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
         if self.attn_backend not in {
-                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
+                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.PALLAS_VLLM_V1
         }:
             raise RuntimeError(
                 f"Qwen2.5-VL does not support {self.attn_backend} backend now."
@@ -319,6 +319,26 @@ class Qwen2_5_VisionAttention(nn.Module):
                 output_i = rearrange(output_i, "b h s d -> b s h d ")
                 outputs.append(output_i)
             context_layer = torch.cat(outputs, dim=1)
+        elif self.attn_backend == _Backend.PALLAS_VLLM_V1:
+            from torch_xla.experimental.custom_kernel import flash_attention
+            # TODO currently too slow to compile ViT!! just testing whether simulating a fast impl helps==>still takes an insane amount of time to compile
+            # issue is that profiling max image size is too big [65536, 1176]! we just need to shrink it down then retry this
+            # TODO (NickLucche) replace with proper ragged attn when available.
+            # outputs = []
+            # for i in range(1, len(cu_seqlens)):
+            #     start_idx = cu_seqlens[i - 1]
+            #     end_idx = cu_seqlens[i]
+            #     q_i = q[:, start_idx:end_idx]
+            #     k_i = k[:, start_idx:end_idx]
+            #     v_i = v[:, start_idx:end_idx]
+            #     q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
+            #                      for x in [q_i, k_i, v_i])
+            #     output_i = flash_attention(q_i,k_i,v_i)
+            #     output_i = rearrange(output_i, "b h s d -> b s h d ")
+            #     outputs.append(output_i)
+            # context_layer = torch.cat(outputs, dim=1)
+            b, s, h, d = q.shape
+            context_layer = torch.randn(b, s, h, d)
         elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask

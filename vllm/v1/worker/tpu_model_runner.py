@@ -1215,6 +1215,7 @@ class TPUModelRunner:
             # Create dummy batch of multimodal inputs.
             batched_dummy_mm_inputs = self._get_mm_dummy_batch(
                 dummy_data_modality, max_num_mm_items)
+            print('shape', {k:v.shape for k, v in batched_dummy_mm_inputs.items()})
 
             # Run multimodal encoder.
             # Isolate encoder graph from post-processing to minimize
