@@ -652,8 +652,12 @@ class TPUModelRunner:
                 expected_num_items=len(grouped_mm_inputs),
             )
 
-            for output in curr_group_outputs:
-                encoder_outputs.append(output)
+            if isinstance(curr_group_outputs, torch.Tensor):
+                encoder_outputs.append(curr_group_outputs)
+            else:
+                assert isinstance(curr_group_outputs, (list, tuple))
+                for output in curr_group_outputs:
+                    encoder_outputs.append(output)
 
         # Cache the encoder outputs.
         # NOTE (NickLucche) here we diverge from logic in other runners, as we
@@ -745,7 +749,7 @@ class TPUModelRunner:
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
         else:
             mm_embeds = []
-
+        xm.mark_step()
         # Prepare inputs
         attn_metadata, logits_indices, padded_num_reqs = self._prepare_inputs(
             scheduler_output)
@@ -969,6 +973,7 @@ class TPUModelRunner:
                         # Assign outputs or the graph will be cut short.
                         a, b = self._get_model_inputs(placeholders_ids,
                                                       [mm_embeds])
+                        assert a is None
                         xm.mark_step()
 
             # Pre-compile `get_input_embeddings` when mm_embeddings are not
@@ -979,6 +984,7 @@ class TPUModelRunner:
                                                device="cpu")
                 placeholders_ids = placeholders_ids.to(self.device)
                 a, b = self._get_model_inputs(placeholders_ids, [])
+                assert a is None
                 xm.mark_step()
 
             xm.wait_device_ops()
