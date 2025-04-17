@@ -605,9 +605,9 @@ class TPUModelRunner:
                                                                 self.device)
         else:
             # Common case (1D positions)
-            self.positions = self.positions_cpu[:
-                                                padded_total_num_scheduled_tokens].to(
-                                                    self.device)
+            self.positions_ids = self.positions_cpu[:
+                                                    padded_total_num_scheduled_tokens].to(
+                                                        self.device)
         self.slot_mapping_cpu[total_num_scheduled_tokens:] = _PAD_SLOT_ID
         slot_mapping = self.slot_mapping_cpu[:
                                              padded_total_num_scheduled_tokens].to(
@@ -873,7 +873,8 @@ class TPUModelRunner:
         xm.mark_step()
         num_reqs = self.input_batch.num_reqs
 
-        positions = self.mrope_positions if self.uses_mrope else self.positions
+        positions = self.mrope_positions if self.uses_mrope else \
+            self.positions_ids
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
@@ -1215,7 +1216,10 @@ class TPUModelRunner:
             # Create dummy batch of multimodal inputs.
             batched_dummy_mm_inputs = self._get_mm_dummy_batch(
                 dummy_data_modality, max_num_mm_items)
-            print('shape', {k:v.shape for k, v in batched_dummy_mm_inputs.items()})
+            print('shape', {
+                k: v.shape
+                for k, v in batched_dummy_mm_inputs.items()
+            })
 
             # Run multimodal encoder.
             # Isolate encoder graph from post-processing to minimize
