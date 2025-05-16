@@ -98,17 +98,26 @@ run_tests_for_model() {
   # Start prefill instances
   for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     # Calculate GPU ID - we'll distribute across available GPUs
-    GPU_ID=$((i % $(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)))
+    # For tensor parallelism, we need to assign multiple consecutive GPUs
+    BASE_GPU_ID=$(((i * $PREFILLER_TP_SIZE) % $(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)))
+    # Create a comma-separated list of GPU IDs for tensor parallelism
+    GPU_IDS=""
+    for ((j=0; j<$PREFILLER_TP_SIZE; j++)); do
+        if [ $j -gt 0 ]; then
+            GPU_IDS+=","
+        fi
+        GPU_IDS+="$((BASE_GPU_ID + j))"
+    done
 
     # Calculate port number (base port + instance number)
     PORT=$((8100 + i))
     # Calculate side channel port. Avoid clash with with TP workers. 
     SIDE_CHANNEL_PORT=$((5559 + i * $PREFILLER_TP_SIZE))
 
-    echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
+    echo "Starting prefill instance $i on GPUs $GPU_IDS, port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="VLLM_WORKER_MULTIPROC_METHOD=spawn VLLM_ENABLE_V1_MULTIPROCESSING=0 CUDA_VISIBLE_DEVICES=$GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
+    BASE_CMD="VLLM_WORKER_MULTIPROC_METHOD=spawn VLLM_ENABLE_V1_MULTIPROCESSING=0 CUDA_VISIBLE_DEVICES=$GPU_IDS VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
     --disable-log-requests \
@@ -132,17 +141,26 @@ run_tests_for_model() {
   # Start decode instances
   for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     # Calculate GPU ID - we'll distribute across available GPUs, starting from after prefill GPUs
-    GPU_ID=$(((i + NUM_PREFILL_INSTANCES) % $(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)))
+    # For tensor parallelism, we need to assign multiple consecutive GPUs
+    BASE_GPU_ID=$(((i * $DECODER_TP_SIZE + $NUM_PREFILL_INSTANCES * $PREFILLER_TP_SIZE) % $(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)))
+    # Create a comma-separated list of GPU IDs for tensor parallelism
+    GPU_IDS=""
+    for ((j=0; j<$DECODER_TP_SIZE; j++)); do
+        if [ $j -gt 0 ]; then
+            GPU_IDS+=","
+        fi
+        GPU_IDS+="$((BASE_GPU_ID + j))"
+    done
 
     # Calculate port number (base port + instance number)
     PORT=$((8200 + i))
     # Calculate side channel port
-    SIDE_CHANNEL_PORT=$((5659 + i * $PREFILLER_TP_SIZE))
+    SIDE_CHANNEL_PORT=$((5659 + i * $DECODER_TP_SIZE + $NUM_PREFILL_INSTANCES * $PREFILLER_TP_SIZE))
 
-    echo "Starting decode instance $i on GPU $GPU_ID, port $PORT"
+    echo "Starting decode instance $i on GPUs $GPU_IDS, port $PORT"
 
     # Build the command with or without model-specific args
-    BASE_CMD="VLLM_WORKER_MULTIPROC_METHOD=spawn VLLM_ENABLE_V1_MULTIPROCESSING=0 CUDA_VISIBLE_DEVICES=$GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
+    BASE_CMD="VLLM_WORKER_MULTIPROC_METHOD=spawn VLLM_ENABLE_V1_MULTIPROCESSING=0 CUDA_VISIBLE_DEVICES=$GPU_IDS VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
     --disable-log-requests \
