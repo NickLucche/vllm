@@ -226,6 +226,7 @@ class NixlConnector(KVConnectorBase_V1):
             # PREFILLER: Sync Actual KV cache with scrambled one so that it can be read from D
             # block_ids = torch.tensor(block_ids)
             # REAL==>FAKE
+            print("COPYING BLOCKS FROM ORIGINAL kv to XFER OPTIMIZED KV")
             for k, real_kv in self.connector_worker.original_kv_caches.items():
                 # [2 (k and v), num_blocks, block_size, kv_heads, head_dim]
                 # => [2, num_blocks, kv_heads, head_dim, block_size]
@@ -705,12 +706,14 @@ class NixlConnectorWorker:
             # TODO this simplifies to self.block_len but its to show math
             rank_id = self.rank % tp_ratio
             rank_offset = remote_block_len // tp_ratio * rank_id
+            # TODO just for testing
+            assert rank_offset == 0 or rank_offset == nixl_agent_meta.block_len // 2
+            assert self.block_len * tp_ratio == nixl_agent_meta.block_len
 
             # Register all remote blocks, but only the corresponding kv heads.
             # now => [remote_num_blocks, remote_kv_heads, head_dim, block_size]
             for base_addr in nixl_agent_meta.kv_caches_base_addr:
                 for block_id in range(nixl_agent_meta.num_blocks):
-                    # block_offset = block_id * self.block_len
                     block_offset = block_id * nixl_agent_meta.block_len # ==remote_block_len
                     # For each block, you either take [0...block_len//2] or [block_len//2...end] in REMOTE size (remote_block_len=2*local)
                     # (addr, len, device id)
@@ -833,16 +836,13 @@ class NixlConnectorWorker:
                     # self.nixl_wrapper.release_xfer_handle(handle)
                     # Sync the blocks that have been copied over to original KV
                     # TODO needs to be on main thread ow races
+                    print("COPYING BLOCKS FROM XFER OPTIMIZED KV TO ORIGINAL")
                     block_ids = torch.tensor(block_ids)
-                    # for each layer. should run on main thread to avoid races
-                    # FIXME results is the same with or without this
                     for k, fake_kv in self.kv_caches.items():
                         # [2 (k and v), num_blocks, block_size, kv_heads, head_dim]
                         # => [2, num_blocks, kv_heads, head_dim, block_size]
                         t2 = fake_kv.permute(0, 1, 4, 2, 3)
-                        # TODO clone maybe not needed
                         self.original_kv_caches[k][:, block_ids] = t2[:, block_ids]#.clone()
-                        # TODO this is scrambled on P side too right
                         # self.original_kv_caches[k][:] = t2
                         # self.original_kv_caches[k].copy_(t2)
 
