@@ -221,7 +221,17 @@ class NixlConnector(KVConnectorBase_V1):
 
     def wait_for_save(self):
         """NixlConnector does not save explicitly."""
-        pass
+        # TODO skip for Decoder properly!
+        if self.connector_worker.world_size == 1:
+            # PREFILLER: Sync Actual KV cache with scrambled one so that it can be read from D
+            # block_ids = torch.tensor(block_ids)
+            # REAL==>FAKE
+            for k, real_kv in self.connector_worker.original_kv_caches.items():
+                # [2 (k and v), num_blocks, block_size, kv_heads, head_dim]
+                # => [2, num_blocks, kv_heads, head_dim, block_size]
+                t2 = real_kv.permute(0, 1, 3, 4, 2)#.clone()
+                # self.original_kv_caches[k][:, block_ids] = t2[:, block_ids].clone()
+                self.connector_worker.kv_caches[k].copy_(t2)
 
 
 class NixlConnectorScheduler:
@@ -831,10 +841,10 @@ class NixlConnectorWorker:
                         # => [2, num_blocks, kv_heads, head_dim, block_size]
                         t2 = fake_kv.permute(0, 1, 4, 2, 3)
                         # TODO clone maybe not needed
-                        # self.original_kv_caches[k][:, block_ids] = t2[:, block_ids].clone()
+                        self.original_kv_caches[k][:, block_ids] = t2[:, block_ids]#.clone()
                         # TODO this is scrambled on P side too right
                         # self.original_kv_caches[k][:] = t2
-                        self.original_kv_caches[k].copy_(t2)
+                        # self.original_kv_caches[k].copy_(t2)
 
                         
                     continue
