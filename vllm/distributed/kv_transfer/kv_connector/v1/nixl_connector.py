@@ -496,7 +496,15 @@ class NixlConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
-
+        # [2 (k and v), num_blocks, block_size, kv_heads, head_dim]
+        # => [2, num_blocks, kv_heads, head_dim, block_size]
+        # FIXME Double the kv cache memory
+        for k, t in kv_caches.items():
+            # TODO can we use view without contiguous copy
+            t2 = t.permute(0, 1, 3, 4, 2).clone()
+            assert t2.data_ptr() != t.data_ptr()
+            # t2 = t2.reshape(t2.shape[0], t2.shape[1], t2.shape[2]*t2.shape[3], t2.shape[4]).clone()
+            self.kv_caches[k] = t2
         _, first_kv_cache = next(iter(kv_caches.items()))
         kv_elem_size = first_kv_cache.element_size()
 
@@ -529,7 +537,8 @@ class NixlConnectorWorker:
                      block_shape)
         logger.debug("Per layer kv cache size: %s", first_kv_cache.shape)
         self.dst_num_blocks[self.engine_id] = self.num_blocks
-        self.kv_caches = kv_caches
+        # self.kv_caches = kv_caches
+        self.original_kv_caches = kv_caches
         kv_caches_base_addr = []
         caches_data = []
 
@@ -539,13 +548,16 @@ class NixlConnectorWorker:
         # are non-contiguous (it's not locally guaranteed that they will be)
         # Disadvantage is that the encoded NixlAgentMetadata is now larger
         # (roughly 8KB vs 5KB).
-        for cache_or_caches in kv_caches.values():
+        # for cache_or_caches in kv_caches.values():
+        # Iterate over scrambled kv caches
+        self.region_len = self.num_blocks * self.block_len
+        # for cache_or_caches in kv_caches.values():
+        for cache_or_caches in self.kv_caches.values():
             # Normalize to always be a list of caches
             cache_list = [cache_or_caches] if use_mla else cache_or_caches
             for cache in cache_list:
                 base_addr = cache.data_ptr()
-                region_len = self.num_blocks * self.block_len
-                caches_data.append((base_addr, region_len, self.rank, ""))
+                caches_data.append((base_addr, self.region_len, self.rank, ""))
                 kv_caches_base_addr.append(base_addr)
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
         self.num_regions = len(caches_data)
@@ -558,6 +570,7 @@ class NixlConnectorWorker:
 
         # Register local/src descr for NIXL xfer.
         blocks_data = []
+        # [kv_heads * head_dim//tp, block_size, num_blocks]
         for base_addr in self.kv_caches_base_addr[self.engine_id]:
             # NOTE With heter-TP, more blocks are prepared than what are
             # needed as self.num_blocks >= nixl_agent_meta.num_blocks. We
@@ -566,11 +579,10 @@ class NixlConnectorWorker:
             # local descr, and that makes handling regular flow less clean.
             for block_id in range(self.num_blocks):
                 block_offset = block_id * self.block_len
-                for slot_idx in range(self.block_size):
-                    slot_offset = slot_idx * self.slot_size_bytes
-                    addr = base_addr + block_offset + slot_offset
-                    # (addr, len, device id)
-                    blocks_data.append((addr, self.slot_size_bytes, self.rank))
+                # (addr, len, device id)
+                blocks_data.append((base_addr + block_offset,
+                                    self.block_len, self.rank))
+            
         logger.debug("Created %s blocks for src engine %s and rank %s",
                      len(blocks_data), self.engine_id, self.rank)
 
@@ -676,18 +688,24 @@ class NixlConnectorWorker:
         if p_remote_rank == remote_rank:
             self.kv_caches_base_addr[
                 engine_id] = nixl_agent_meta.kv_caches_base_addr
-            rank_offset = self.rank % tp_ratio * self.slot_size_bytes
+            
+            # (num_kv*tp) * head_dim * page_size
+            remote_block_len = self.block_len * tp_ratio
+            assert nixl_agent_meta.block_len == remote_block_len
+            # TODO this simplifies to self.block_len but its to show math
+            rank_id = self.rank % tp_ratio
+            rank_offset = remote_block_len // tp_ratio * rank_id
+
             # Register all remote blocks, but only the corresponding kv heads.
+            # now => [remote_num_blocks, remote_kv_heads, head_dim, block_size]
             for base_addr in nixl_agent_meta.kv_caches_base_addr:
                 for block_id in range(nixl_agent_meta.num_blocks):
-                    block_offset = block_id * nixl_agent_meta.block_len
-                    for slot_idx in range(self.block_size):
-                        # Remote has `tp_ratio` times the kv_heads of local.
-                        slot_offset = slot_idx * self.slot_size_bytes * tp_ratio
-                        addr = base_addr + block_offset + slot_offset
-                        # (addr, len, device id)
-                        blocks_data.append((addr + rank_offset,
-                                            self.slot_size_bytes, remote_rank))
+                    # block_offset = block_id * self.block_len
+                    block_offset = block_id * nixl_agent_meta.block_len # ==remote_block_len
+                    # For each block, you either take [0...block_len//2] or [block_len//2...end] in REMOTE size (remote_block_len=2*local)
+                    # (addr, len, device id)
+                    blocks_data.append((base_addr + block_offset + rank_offset,
+                                        self.block_len, remote_rank))
             logger.debug(
                 "Created %s blocks for dst engine %s with remote rank %s and " \
                 "local rank %s",
@@ -713,6 +731,12 @@ class NixlConnectorWorker:
         """
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
+        # print("xfer Wait/Running Q size", len(self._recving_transfers),"\n")
+        # print("xfer Done Q size", len(done_recving), "\n")
+        # if len(self._recving_transfers):
+            # print("len(self._recving_transfers)", len(self._recving_transfers))
+            # print("Handles in one a single req xfer group ", next(iter(self._recving_transfers.items()))[1],"\n")
+
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
                 "Rank %s, get_finished: %s requests done sending "
@@ -788,16 +812,34 @@ class NixlConnectorWorker:
             set of req_ids that have all done xfers
         """
         done_req_ids: set[str] = set()
+        # TODO we can skip this list copy if we refrain from editing the dict as we iterate 
         for req_id, handles in list(transfers.items()):
             running_reqs = []
-            for handle in handles:
+            # Unlike dynamo, I think we only have one handle per request.
+            for (handle, block_ids) in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
                     # TODO ptarasiewicz: why abort is throwing errors?
                     # self.nixl_wrapper.release_xfer_handle(handle)
+                    # Sync the blocks that have been copied over to original KV
+                    # TODO needs to be on main thread ow races
+                    block_ids = torch.tensor(block_ids)
+                    # for each layer. should run on main thread to avoid races
+                    # FIXME results is the same with or without this
+                    for k, fake_kv in self.kv_caches.items():
+                        # [2 (k and v), num_blocks, block_size, kv_heads, head_dim]
+                        # => [2, num_blocks, kv_heads, head_dim, block_size]
+                        t2 = fake_kv.permute(0, 1, 4, 2, 3)
+                        # TODO clone maybe not needed
+                        # self.original_kv_caches[k][:, block_ids] = t2[:, block_ids].clone()
+                        # TODO this is scrambled on P side too right
+                        # self.original_kv_caches[k][:] = t2
+                        self.original_kv_caches[k].copy_(t2)
+
+                        
                     continue
                 if xfer_state == "PROC":
-                    running_reqs.append(handle)
+                    running_reqs.append((handle, block_ids))
                 else:
                     raise RuntimeError("Transfer failed with state %s",
                                        xfer_state)
@@ -899,7 +941,7 @@ class NixlConnectorWorker:
         self.nixl_wrapper.transfer(handle)
 
         # Use handle to check completion in future step().
-        self._recving_transfers[request_id].append(handle)
+        self._recving_transfers[request_id].append((handle, local_block_ids))
 
     def _get_block_descs_ids(self, engine_id: str,
                              block_ids: list[int]) -> list[int]:
@@ -908,16 +950,17 @@ class NixlConnectorWorker:
 
         # range(1) for MLA, range(2) otherwise.
         region_ids = range(self.num_regions)
-        # TODO using a diff num of blocks here in dst and src
+        # For source these are more than dst
         num_blocks = self.dst_num_blocks[engine_id]
+        print(f"IS_LOCAL {engine_id==self.engine_id}, {num_blocks=}, {len(region_ids)=}")
 
         # Compute the desc ids for each block.
         descs_ids: list[int] = []
         for reg_id in region_ids:
             for block_id in block_ids:
-                for slot_id in range(self.block_size):
-                    descs_ids.append(reg_id * num_blocks * self.block_size +
-                                     block_id * self.block_size + slot_id)
+                descs_ids.append(reg_id * num_blocks + block_id)
+
+        print(f"IS_LOCAL {engine_id==self.engine_id}, {len(descs_ids)}")
         return descs_ids
 
 
