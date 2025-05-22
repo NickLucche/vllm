@@ -357,8 +357,10 @@ class NixlConnectorWorker:
 
         # In progress transfers.
         # [req_id -> list[handle]]
-        self._recving_transfers: defaultdict[str, list[Any]] = defaultdict(
-            list[Any])
+        self._recving_transfers: defaultdict[str,
+                                             list[tuple[int,
+                                                        float]]] = defaultdict(
+                                                            list[Any])
 
         # Complete transfer tracker. Used by the rank 0 to track finished
         # transactions on ranks 1 to N-1.
@@ -769,7 +771,8 @@ class NixlConnectorWorker:
                     del self.consumer_notification_counts_by_req[req_id]
         return notified_req_ids
 
-    def _pop_done_transfers(self, transfers: dict[str, list[int]]) -> set[str]:
+    def _pop_done_transfers(
+            self, transfers: dict[str, list[tuple[int, float]]]) -> set[str]:
         """
         Pop completed xfers by checking for DONE state.
         Args:
