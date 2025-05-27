@@ -1979,10 +1979,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                    # kv_cache_shape=(16, 8, 128)=>( 8, 16, 128)
                     dtype = kv_cache_spec.dtype
-                    kv_caches[layer_name] = torch.zeros(kv_cache_shape,
-                                                        dtype=dtype,
-                                                        device=self.device)
+                    # kv_caches[layer_name] = torch.zeros(kv_cache_shape,
+                    #                                     dtype=dtype,
+                    #                                     device=self.device)
+                    # TODO proper impl handling MLA
+                    kv_cache_shape = (2, kv_cache_shape[1], kv_cache_shape[3],
+                                      kv_cache_shape[2], kv_cache_shape[4])
+                    kv_caches[layer_name] = torch.zeros(
+                        kv_cache_shape, dtype=dtype,
+                        device=self.device).permute(0, 1, 3, 2, 4)
+
                 else:
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
