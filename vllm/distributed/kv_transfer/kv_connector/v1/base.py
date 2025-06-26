@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import KVTransferStats
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -78,6 +79,12 @@ class KVConnectorBase_V1(ABC):
     @property
     def role(self) -> KVConnectorRole:
         return self._role
+
+    def get_transfer_stats(self) -> KVTransferStats:
+        """
+        Get the transfer stats.
+        """
+        return KVTransferStats()
 
     # ==============================
     # Worker-side methods

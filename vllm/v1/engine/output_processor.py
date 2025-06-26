@@ -379,6 +379,7 @@ class OutputProcessor:
                 continue
 
             # 1) Compute stats for this iteration.
+            # TODO: add kv transfer stats
             self._update_stats_from_output(req_state, engine_core_output,
                                            engine_core_timestamp,
                                            iteration_stats)

@@ -21,6 +21,7 @@ from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferStats
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
-Transfer = tuple[int, float]  # (xfer_handle, start_time)
+Transfer = tuple[int, float, int]  # (xfer_handle, start_time, num_blocks)
 EngineId = str
 ReqId = str
 GET_META_MSG = b"get_meta_msg"
@@ -428,6 +429,9 @@ class NixlConnectorWorker:
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
+        
+        # Transfer metrics tracking
+        self.transfer_metrics = KVTransferStats()
 
     def __del__(self):
         """Cleanup background threads on destruction."""
@@ -850,7 +854,7 @@ class NixlConnectorWorker:
         return notified_req_ids
 
     def _pop_done_transfers(
-            self, transfers: dict[str, list[tuple[int, float]]]) -> set[str]:
+            self, transfers: dict[str, list[Transfer]]) -> set[str]:
         """
         Pop completed xfers by checking for DONE state.
         Args:
@@ -859,11 +863,26 @@ class NixlConnectorWorker:
             set of req_ids that have all done xfers
         """
         done_req_ids: set[str] = set()
+        current_time = time.perf_counter()
+        
         for req_id, handles in list(transfers.items()):
             in_progress = False
-            for handle, _xfer_stime in handles:
+            for handle, xfer_stime, num_blocks in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
+                    # Calculate transfer metrics
+                    transfer_duration = current_time - xfer_stime
+                    
+                    # Calculate bytes transferred based on actual block count
+                    bytes_transferred = self.block_len * num_blocks
+                    
+                    # Record the completed transfer metrics
+                    self.transfer_metrics.record_transfer(
+                        duration=transfer_duration,
+                        bytes_count=bytes_transferred,
+                        num_blocks=num_blocks
+                    )
+                    
                     self.nixl_wrapper.release_xfer_handle(handle)
                 elif xfer_state == "PROC":
                     in_progress = True
@@ -871,10 +890,63 @@ class NixlConnectorWorker:
                 else:
                     raise RuntimeError("Transfer failed with state %s",
                                        xfer_state)
+            
+            
             if not in_progress:
                 done_req_ids.add(req_id)
                 del transfers[req_id]
         return done_req_ids
+
+    def _maybe_log_transfer_metrics(self):
+        """Log transfer metrics periodically, similar to throughput logging"""
+        now = time.monotonic()
+        time_since_last_log = now - self.transfer_metrics.last_log_time
+        
+        if time_since_last_log >= self.log_interval_seconds:
+            # Only log if we have transfer data
+            if self.transfer_metrics.transfer_durations:
+                # Get throughput stats
+                bytes_per_sec, blocks_per_sec, transfers_per_sec = \
+                    self.transfer_metrics.get_throughput_stats(now)
+                    
+                # Get latency stats
+                avg_latency, p50_latency, p95_latency = \
+                    self.transfer_metrics.get_latency_stats()
+                
+                # Format throughput for readability
+                if bytes_per_sec >= 1024**3:  # GB/s
+                    bytes_throughput_str = f"{bytes_per_sec / (1024**3):.2f} GB/s"
+                elif bytes_per_sec >= 1024**2:  # MB/s
+                    bytes_throughput_str = f"{bytes_per_sec / (1024**2):.1f} MB/s"
+                elif bytes_per_sec >= 1024:  # KB/s
+                    bytes_throughput_str = f"{bytes_per_sec / 1024:.1f} KB/s"
+                else:  # B/s
+                    bytes_throughput_str = f"{bytes_per_sec:.1f} B/s"
+                
+                # Log the metrics in a format similar to the existing throughput logs
+                logger.info(
+                    "Engine %s: KV Transfer metrics: "
+                    "Avg transfer throughput: %s, "
+                    "Blocks/s: %.1f, Transfers/s: %.1f, "
+                    "Avg latency: %.3fs, P50: %.3fs, P95: %.3fs, "
+                    "Total transfers: %d",
+                    self.engine_id,
+                    bytes_throughput_str,
+                    blocks_per_sec,
+                    transfers_per_sec,
+                    avg_latency,
+                    p50_latency,
+                    p95_latency,
+                    len(self.transfer_metrics.transfer_durations)
+                )
+            else:
+                # Log that no transfers occurred
+                logger.debug(
+                    "Engine %s: No KV transfers in the last %.1fs",
+                    self.engine_id, time_since_last_log)
+            
+            # Reset metrics for next interval
+            self.transfer_metrics.reset(now)
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """
@@ -1029,9 +1101,9 @@ class NixlConnectorWorker:
         self.nixl_wrapper.transfer(handle)
 
         # Use handle to check completion in future step().
-        # TODO (NickLucche) surface xfer elapsed time
-        self._recving_transfers[request_id].append(
-            (handle, time.perf_counter()))
+        # Store handle, start_time, and block count for metrics tracking
+        transfer_info = (handle, time.perf_counter(), len(local_block_ids))
+        self._recving_transfers[request_id].append(transfer_info)
 
     def _get_block_descs_ids(self,
                              engine_id: str,
