@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import NixlConnector
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferAggregatedStats
 from vllm.distributed.kv_transfer.kv_transfer_state import get_kv_transfer_group, has_kv_transfer_group
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -97,7 +97,7 @@ class IterationStats:
         self.time_per_output_tokens_iter: list[float] = []
         self.waiting_lora_adapters: dict[str, int] = {}
         self.running_lora_adapters: dict[str, int] = {}
-        self.kv_transfer_stats: Optional[KVTransferStats] = None
+        self.kv_transfer_stats: Optional[KVTransferAggregatedStats] = None
         
     def _time_since(self, start: float) -> float:
         """Calculate an interval relative to this iteration's timestamp."""
@@ -106,7 +106,8 @@ class IterationStats:
     def update_from_output(self, output: "EngineCoreOutput",
                            engine_core_timestamp: float, is_prefilling: bool,
                            prompt_len: int, req_stats: RequestStateStats,
-                           lora_stats: Optional[LoRAStats]):
+                           lora_stats: Optional[LoRAStats],
+                           kv_transfer_stats: Optional[KVTransferAggregatedStats]):
         num_new_generation_tokens = len(output.new_token_ids)
 
         self.num_generation_tokens += num_new_generation_tokens
@@ -130,13 +131,8 @@ class IterationStats:
             tpot = engine_core_timestamp - req_stats.last_token_ts
             self.time_per_output_tokens_iter.append(tpot)
         
-        # TODO: add kv transfer stats
-        if has_kv_transfer_group():
-            kv_connector = get_kv_transfer_group()
-            # TODO support other connectors, support multiple connectors
-            if isinstance(kv_connector, NixlConnector):
-                kv_transfer_stats = kv_connector.get_transfer_stats()
-                self.kv_transfer_stats = kv_transfer_stats
+        if kv_transfer_stats is not None:
+            self.kv_transfer_stats = kv_transfer_stats
 
         req_stats.last_token_ts = engine_core_timestamp
 

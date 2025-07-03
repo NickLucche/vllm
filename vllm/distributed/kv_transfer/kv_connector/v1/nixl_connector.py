@@ -21,7 +21,7 @@ from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferStats
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferAggregatedStats, KVTransferStats
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -179,6 +179,11 @@ class NixlConnector(KVConnectorBase_V1):
     def wait_for_save(self):
         """NixlConnector does not save explicitly."""
         pass
+
+    
+    def get_transfer_stats(self) -> Optional[KVTransferAggregatedStats]:
+        assert self.connector_worker is not None
+        return self.connector_worker.xfer_stats_aggregated
 
 
 class NixlConnectorScheduler:
@@ -430,8 +435,9 @@ class NixlConnectorWorker:
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
         
-        # Transfer metrics tracking
-        self.transfer_metrics = KVTransferStats()
+        # Transfer metrics tracking.
+        self.xfer_stats = KVTransferStats()
+        self.xfer_stats_aggregated = KVTransferAggregatedStats()
 
     def __del__(self):
         """Cleanup background threads on destruction."""
@@ -789,9 +795,12 @@ class NixlConnectorWorker:
                 "Rank %s, get_finished: %s requests done sending "
                 "and %s requests done recving", self.tp_rank,
                 len(done_sending), len(done_recving))
-
+                
+        # Aggregate transfer stats for this rank.
+        xfer_stats = self.xfer_stats.reduce_and_reset()
+        self.xfer_stats_aggregated.aggregate(xfer_stats)
         if self.world_size == 1:
-            return done_sending, done_recving
+            return done_sending, done_recving, self.xfer_stats_aggregated
 
         # Rank 0: get finished from all other ranks.
         if self.tp_rank == 0:
@@ -803,8 +812,12 @@ class NixlConnectorWorker:
             # Keep track of how many other ranks have finished.
             other_ranks_finished_ids: list[str] = []
             for i in range(1, self.world_size):
-                other_ranks_finished_ids.extend(
-                    self.tp_group.recv_object(src=i))
+                finished_req_ids, xfer_stats = self.tp_group.recv_object(src=i)
+                other_ranks_finished_ids.extend(finished_req_ids)
+                # Aggregate transfer stats from all ranks.
+                self.xfer_stats_aggregated.aggregate(xfer_stats)
+                # TODO reset after logging or keep global?
+            
             for req_id in other_ranks_finished_ids:
                 if (req_id in self._done_recving_count
                         or req_id in self._recving_transfers):
@@ -825,15 +838,15 @@ class NixlConnectorWorker:
                     del self._done_sending_count[req_id]
                     all_done_sending.add(req_id)
 
-            return all_done_sending, all_done_recving
+            return all_done_sending, all_done_recving, self.xfer_stats_aggregated
 
         # Ranks 1 to N-1: send finished ids to Rank 0.
         else:
             finished_req_ids = list(done_recving.union(done_sending))
-            self.tp_group.send_object(finished_req_ids, dst=0)
+            self.tp_group.send_object((finished_req_ids, xfer_stats), dst=0)
 
             # Unused as only Rank 0 results are sent to scheduler.
-            return done_sending, done_recving
+            return done_sending, done_recving, self.xfer_stats_aggregated
 
     def _get_new_notifs(self) -> set[str]:
         """
@@ -877,11 +890,13 @@ class NixlConnectorWorker:
                     bytes_transferred = self.block_len * num_blocks
                     
                     # Record the completed transfer metrics
-                    self.transfer_metrics.record_transfer(
-                        duration=transfer_duration,
-                        bytes_count=bytes_transferred,
-                        num_blocks=num_blocks
-                    )
+                    # self.transfer_stats.record_transfer(
+                    #     duration=transfer_duration,
+                    #     bytes_count=bytes_transferred,
+                    #     num_blocks=num_blocks
+                    # )
+                    # TODO actual observe
+                    self.xfer_stats.observe()
                     
                     self.nixl_wrapper.release_xfer_handle(handle)
                 elif xfer_state == "PROC":
@@ -897,56 +912,6 @@ class NixlConnectorWorker:
                 del transfers[req_id]
         return done_req_ids
 
-    def _maybe_log_transfer_metrics(self):
-        """Log transfer metrics periodically, similar to throughput logging"""
-        now = time.monotonic()
-        time_since_last_log = now - self.transfer_metrics.last_log_time
-        
-        if time_since_last_log >= self.log_interval_seconds:
-            # Only log if we have transfer data
-            if self.transfer_metrics.transfer_durations:
-                # Get throughput stats
-                bytes_per_sec, blocks_per_sec, transfers_per_sec = \
-                    self.transfer_metrics.get_throughput_stats(now)
-                    
-                # Get latency stats
-                avg_latency, p50_latency, p95_latency = \
-                    self.transfer_metrics.get_latency_stats()
-                
-                # Format throughput for readability
-                if bytes_per_sec >= 1024**3:  # GB/s
-                    bytes_throughput_str = f"{bytes_per_sec / (1024**3):.2f} GB/s"
-                elif bytes_per_sec >= 1024**2:  # MB/s
-                    bytes_throughput_str = f"{bytes_per_sec / (1024**2):.1f} MB/s"
-                elif bytes_per_sec >= 1024:  # KB/s
-                    bytes_throughput_str = f"{bytes_per_sec / 1024:.1f} KB/s"
-                else:  # B/s
-                    bytes_throughput_str = f"{bytes_per_sec:.1f} B/s"
-                
-                # Log the metrics in a format similar to the existing throughput logs
-                logger.info(
-                    "Engine %s: KV Transfer metrics: "
-                    "Avg transfer throughput: %s, "
-                    "Blocks/s: %.1f, Transfers/s: %.1f, "
-                    "Avg latency: %.3fs, P50: %.3fs, P95: %.3fs, "
-                    "Total transfers: %d",
-                    self.engine_id,
-                    bytes_throughput_str,
-                    blocks_per_sec,
-                    transfers_per_sec,
-                    avg_latency,
-                    p50_latency,
-                    p95_latency,
-                    len(self.transfer_metrics.transfer_durations)
-                )
-            else:
-                # Log that no transfers occurred
-                logger.debug(
-                    "Engine %s: No KV transfers in the last %.1fs",
-                    self.engine_id, time_since_last_log)
-            
-            # Reset metrics for next interval
-            self.transfer_metrics.reset(now)
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """

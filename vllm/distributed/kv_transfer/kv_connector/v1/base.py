@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import KVTransferStats
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferAggregatedStats
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -80,11 +80,11 @@ class KVConnectorBase_V1(ABC):
     def role(self) -> KVConnectorRole:
         return self._role
 
-    def get_transfer_stats(self) -> KVTransferStats:
+    def get_transfer_stats(self) -> Optional[KVTransferAggregatedStats]:
         """
         Get the transfer stats.
         """
-        return KVTransferStats()
+        return None
 
     # ==============================
     # Worker-side methods
@@ -194,7 +194,7 @@ class KVConnectorBase_V1(ABC):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[Optional[set[str]], Optional[set[str]], Optional[KVTransferAggregatedStats]]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.
@@ -206,7 +206,7 @@ class KVConnectorBase_V1(ABC):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        return None, None
+        return None, None, None
 
     # ==============================
     # Scheduler-side methods
