@@ -533,6 +533,8 @@ class NixlConnectorWorker:
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
+        self.times = defaultdict[str, list[float]](list)
+        self.last_time = None
 
     def __del__(self):
         """Cleanup background threads on destruction."""
@@ -1006,6 +1008,10 @@ class NixlConnectorWorker:
         """
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
+        # Print times every few seconds
+        if self.last_time is None or time.perf_counter() - self.last_time > 10:
+            self.last_time = time.perf_counter()
+            logger.info("Times: %s", dict(self.times))
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
                 "Rank %s, get_finished: %s requests done sending "
@@ -1122,6 +1128,7 @@ class NixlConnectorWorker:
     def _read_blocks(self, local_block_ids: list[int],
                      remote_block_ids: list[int], dst_engine_id: str,
                      request_id: str):
+        start_time = time.perf_counter()
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
         # after we detect the txn is complete (which means we cannot make the
@@ -1198,6 +1205,7 @@ class NixlConnectorWorker:
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
         # Prepare transfer with Nixl.
+        s2 = time.perf_counter()
         handle = self.nixl_wrapper.make_prepped_xfer(
             "READ",
             local_xfer_side_handle,
@@ -1205,15 +1213,21 @@ class NixlConnectorWorker:
             remote_xfer_side_handle,
             remote_block_descs_ids,
             notif_msg=notif_id,
+            skip_desc_merge=True,
         )
+        self.times["make_prepped_xfer"].append(time.perf_counter() - s2)
 
         # Begin async xfer.
+        s3 = time.perf_counter()
         self.nixl_wrapper.transfer(handle)
+        self.times["nixl.transfer"].append(time.perf_counter() - s3)
 
         # Use handle to check completion in future step().
         # TODO (NickLucche) surface xfer elapsed time
         self._recving_transfers[request_id].append(
             (handle, time.perf_counter()))
+        self.times["read_blocks"].append(time.perf_counter() - start_time)
+        logger.info("Times after read: %s", dict(self.times))
 
     def _get_block_descs_ids(self,
                              engine_id: str,
