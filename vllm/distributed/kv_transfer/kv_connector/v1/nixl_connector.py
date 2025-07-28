@@ -1216,17 +1216,21 @@ class NixlConnectorWorker:
             skip_desc_merge=True,
         )
         self.times["make_prepped_xfer"].append(time.perf_counter() - s2)
+        logger.info("make_prepped_xfer time: %ss",
+                    self.times["make_prepped_xfer"][-1])
 
         # Begin async xfer.
         s3 = time.perf_counter()
         self.nixl_wrapper.transfer(handle)
         self.times["nixl.transfer"].append(time.perf_counter() - s3)
+        logger.info("nixl.transfer time: %ss", self.times["nixl.transfer"][-1])
 
         # Use handle to check completion in future step().
         # TODO (NickLucche) surface xfer elapsed time
         self._recving_transfers[request_id].append(
             (handle, time.perf_counter()))
         self.times["read_blocks"].append(time.perf_counter() - start_time)
+        logger.info("read_blocks time: %ss\n", self.times["read_blocks"][-1])
         logger.info("Times after read: %s", dict(self.times))
 
     def _get_block_descs_ids(self,
