@@ -29,6 +29,7 @@ from transformers import BartConfig
 from transformers.utils import logging
 
 from vllm.attention import Attention, AttentionType
+from vllm.attention.layer import MultiHeadAttention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -43,10 +44,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsQuant, SupportsV0Only
+from .interfaces import SupportsQuant
 from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
                     maybe_prefix)
 
@@ -177,14 +177,12 @@ class BartEncoderAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
 
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn",
-                              attn_type=AttentionType.ENCODER)
+        self.attn = MultiHeadAttention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
@@ -192,9 +190,17 @@ class BartEncoderAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
+        is_2d = q.dim() == 2
+        if is_2d:
+            q = q.unsqueeze(0)
+            k = k.unsqueeze(0)
+            v = v.unsqueeze(0)
+
         attn_output = self.attn(q, k, v)
 
         output, _ = self.out_proj(attn_output)
+        if is_2d:
+            output = output.squeeze(0)
         return output
 
 
@@ -798,7 +804,7 @@ class BartModel(nn.Module, SupportsQuant):
         return loaded_params
 
 
-class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
+class BartForConditionalGeneration(nn.Module, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "decoder.": "model.decoder.",
@@ -865,10 +871,8 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -1217,7 +1221,7 @@ class MBartModel(nn.Module, SupportsQuant):
         return decoder_outputs
 
 
-class MBartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
+class MBartForConditionalGeneration(nn.Module, SupportsQuant):
     base_model_prefix = "model"
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -1272,10 +1276,8 @@ class MBartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
