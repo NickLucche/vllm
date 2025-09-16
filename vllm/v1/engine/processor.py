@@ -5,6 +5,8 @@ import time
 from collections.abc import Mapping
 from typing import Any, Literal
 
+import torch
+
 from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
@@ -13,13 +15,16 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
-from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
+from vllm.multimodal.inputs import (MultiModalFeatureSpec, MultiModalFieldElem,
+                                    MultiModalKwargsItem,
+                                    MultiModalSharedField, MultiModalUUIDDict,
+                                    PlaceholderRange)
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils import length_from_prompt_token_ids_or_embeds, sha256
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import MultiModalCacheStats
 from vllm.v1.structured_output.backend_guidance import validate_guidance_grammar
@@ -424,6 +429,8 @@ class Processor:
             if decoder_inputs["type"] == "embeds"
             else None
         )
+        encoder_token_ids = (encoder_inputs["prompt_token_ids"]
+                             if encoder_inputs else [])
 
         sampling_params = None
         pooling_params = None
@@ -467,6 +474,29 @@ class Processor:
                         mm_position=decoder_mm_positions[modality][idx],
                     )
                 )
+
+        if encoder_token_ids:
+            # If we have an encoder text prompt, treat it like a multimodal
+            # input with modality "text". This allows us to reuse all of
+            # the existing logic for scheduling encoder inputs.
+            mm_features = mm_features or []
+
+            encoder_tensor = torch.tensor(encoder_token_ids, dtype=torch.long)
+            text_elem = MultiModalFieldElem(
+                modality="text",
+                key="input_ids",
+                data=encoder_tensor,
+                field=MultiModalSharedField(1),
+            )
+            text_mm_item = MultiModalKwargsItem.from_elems([text_elem])
+
+            mm_features.append(
+                MultiModalFeatureSpec(
+                    data=text_mm_item,
+                    modality="text",
+                    identifier=sha256(encoder_token_ids).hex(),
+                    mm_position=PlaceholderRange(
+                        offset=0, length=len(encoder_token_ids))))
 
         return EngineCoreRequest(
             request_id=request_id,
