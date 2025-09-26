@@ -44,9 +44,10 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsQuant
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
                     maybe_prefix)
 
@@ -804,7 +805,8 @@ class BartModel(nn.Module, SupportsQuant):
         return loaded_params
 
 
-class BartForConditionalGeneration(nn.Module, SupportsQuant):
+class BartForConditionalGeneration(nn.Module, SupportsQuant,
+                                   SupportsMultiModal):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "decoder.": "model.decoder.",
@@ -841,6 +843,19 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant):
                                           embed_scale=embed_scale)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
+
+    def get_language_model(self) -> nn.Module:
+        return self.model.decoder
+
+    def get_multimodal_embeddings(self, **kwargs) -> MultiModalEmbeddings:
+        raise NotImplementedError()
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError()
 
     def forward(
         self,
