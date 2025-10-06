@@ -270,6 +270,19 @@ class VideoEmbeddingItems(EmbeddingItems):
         super().__init__(data, "video")
 
 
+class TextProcessorItems(ProcessorBatchItems[str]):
+    """
+    Data items for text modality (used for encoder-decoder models like BART).
+    """
+
+    def __init__(self, data: Optional[Union[str, Sequence[str]]]) -> None:
+        if data is None:
+            data = [""]
+        elif isinstance(data, str):
+            data = [data]
+        super().__init__(data, "text")
+
+
 _D = TypeVar("_D", bound=ModalityDataItems[Any, Any])
 
 
@@ -516,11 +529,31 @@ class MultiModalDataParser:
 
         return VideoProcessorItems(new_videos, metadata=metadata_lst)
 
+    def _parse_text_data(
+        self,
+        data: ModalityData[str],
+    ) -> Optional[ModalityDataItems[Any, Any]]:
+        """Parse text data for encoder-decoder models like BART."""
+        if data is None:
+            return TextProcessorItems(None)
+
+        if self._is_empty(data):
+            return None
+
+        # Text data should be a string or list of strings
+        if isinstance(data, str) or is_list_of(data, str):
+            return TextProcessorItems(data)
+        else:
+            raise TypeError(
+                f"Text data must be a string or list of strings, got {type(data)}"
+            )
+
     def _get_subparsers(self) -> Mapping[str, ModalityDataParser]:
         return {
             "audio": self._parse_audio_data,
             "image": self._parse_image_data,
             "video": self._parse_video_data,
+            "text": self._parse_text_data,
         }
 
     def parse_mm_data(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:

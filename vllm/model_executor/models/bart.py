@@ -19,9 +19,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """PyTorch BART model."""
+
 import math
-from collections.abc import Iterable
-from typing import Optional
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -32,24 +33,39 @@ from vllm.attention import Attention, AttentionType
 from vllm.attention.layer import MultiHeadAttention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               QKVCrossParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    QKVCrossParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.multimodal import NestedTensors
+from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
+from vllm.multimodal.inputs import (
+    MultiModalDataDict,
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
+from vllm.multimodal.parse import MultiModalDataItems, TextProcessorItems
+from vllm.multimodal.processing import (
+    BaseProcessingInfo,
+    EncDecMultiModalProcessor,
+    PromptUpdate,
+)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
-from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
-                    maybe_prefix)
+from .utils import AutoWeightsLoader, WeightsMapper, cast_overflow_tensors, maybe_prefix
 
 logger = logging.get_logger(__name__)
 
@@ -86,14 +102,13 @@ class BartLearnedPositionalEmbedding(VocabParallelEmbedding):
 
 class BartScaledWordEmbedding(VocabParallelEmbedding):
     """
-    This module overrides VocabParallelEmbedding's 
+    This module overrides VocabParallelEmbedding's
     forward by multiplying with embeddings scale.
     """
 
-    def __init__(self,
-                 num_embeddings: int,
-                 embedding_dim: int,
-                 embed_scale: float = 1.0):
+    def __init__(
+        self, num_embeddings: int, embedding_dim: int, embed_scale: float = 1.0
+    ):
         super().__init__(num_embeddings, embedding_dim)
         self.embed_scale = embed_scale
 
@@ -109,10 +124,9 @@ class BartParallelLMHead(ParallelLMHead):
     BartScaledWordEmbedding
     """
 
-    def __init__(self,
-                 num_embeddings: int,
-                 embedding_dim: int,
-                 embed_scale: float = 1.0):
+    def __init__(
+        self, num_embeddings: int, embedding_dim: int, embed_scale: float = 1.0
+    ):
         super().__init__(num_embeddings, embedding_dim)
         self.embed_scale = embed_scale
 
@@ -121,7 +135,6 @@ class BartParallelLMHead(ParallelLMHead):
 
 
 class BartEncoderAttention(nn.Module):
-
     def __init__(
         self,
         embed_dim: int,
@@ -141,9 +154,11 @@ class BartEncoderAttention(nn.Module):
         self.config = config
 
         if (self.head_dim * num_heads) != self.embed_dim:
-            raise ValueError(f"embed_dim must be divisible by num_heads "
-                             f"(got `embed_dim`: {self.embed_dim}"
-                             f" and `num_heads`: {num_heads}).")
+            raise ValueError(
+                f"embed_dim must be divisible by num_heads "
+                f"(got `embed_dim`: {self.embed_dim}"
+                f" and `num_heads`: {num_heads})."
+            )
         self.scaling = self.head_dim**-0.5
 
         self.qkv_proj = QKVParallelLinear(
@@ -206,7 +221,6 @@ class BartEncoderAttention(nn.Module):
 
 
 class BartDecoderSelfAttention(nn.Module):
-
     def __init__(
         self,
         embed_dim: int,
@@ -226,9 +240,11 @@ class BartDecoderSelfAttention(nn.Module):
         self.config = config
 
         if (self.head_dim * num_heads) != self.embed_dim:
-            raise ValueError(f"embed_dim must be divisible by num_heads "
-                             f"(got `embed_dim`: {self.embed_dim}"
-                             f" and `num_heads`: {num_heads}).")
+            raise ValueError(
+                f"embed_dim must be divisible by num_heads "
+                f"(got `embed_dim`: {self.embed_dim}"
+                f" and `num_heads`: {num_heads})."
+            )
         self.scaling = self.head_dim**-0.5
 
         self.qkv_proj = QKVParallelLinear(
@@ -263,14 +279,16 @@ class BartDecoderSelfAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
 
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn",
-                              attn_type=AttentionType.DECODER)
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+            attn_type=AttentionType.DECODER,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
@@ -285,7 +303,6 @@ class BartDecoderSelfAttention(nn.Module):
 
 
 class BartCrossAttention(nn.Module):
-
     def __init__(
         self,
         embed_dim: int,
@@ -305,19 +322,22 @@ class BartCrossAttention(nn.Module):
         self.config = config
 
         if (self.head_dim * num_heads) != self.embed_dim:
-            raise ValueError(f"embed_dim must be divisible by num_heads "
-                             f"(got `embed_dim`: {self.embed_dim}"
-                             f" and `num_heads`: {num_heads}).")
+            raise ValueError(
+                f"embed_dim must be divisible by num_heads "
+                f"(got `embed_dim`: {self.embed_dim}"
+                f" and `num_heads`: {num_heads})."
+            )
         self.scaling = self.head_dim**-0.5
 
         # TP sharding sizes is accounted for within "*Parallel" layers.
-        self.qkv_proj = QKVCrossParallelLinear(self.d_model,
-                                               self.d_model //
-                                               self.total_num_heads,
-                                               self.total_num_heads,
-                                               self.total_num_kv_heads,
-                                               bias,
-                                               quant_config=quant_config)
+        self.qkv_proj = QKVCrossParallelLinear(
+            self.d_model,
+            self.d_model // self.total_num_heads,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias,
+            quant_config=quant_config,
+        )
 
         self.out_proj = RowParallelLinear(
             embed_dim,
@@ -339,14 +359,16 @@ class BartCrossAttention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_world_size % self.total_num_kv_heads == 0
         self.num_kv_heads = self.num_heads  # No GQA in bart
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn",
-                              attn_type=AttentionType.ENCODER_DECODER)
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+            attn_type=AttentionType.ENCODER_DECODER,
+        )
 
     def forward(
         self,
@@ -364,7 +386,6 @@ class BartCrossAttention(nn.Module):
 
 
 class BartEncoderLayer(nn.Module):
-
     def __init__(
         self,
         config: BartConfig,
@@ -429,15 +450,14 @@ class BartEncoderLayer(nn.Module):
         hidden_states = self.final_layer_norm(hidden_states)
 
         if hidden_states.dtype == torch.float16 and (
-                torch.isinf(hidden_states).any()
-                or torch.isnan(hidden_states).any()):
+            torch.isinf(hidden_states).any() or torch.isnan(hidden_states).any()
+        ):
             hidden_states = cast_overflow_tensors(hidden_states)
 
         return hidden_states
 
 
 class BartDecoderLayer(nn.Module):
-
     def __init__(
         self,
         config: BartConfig,
@@ -459,11 +479,11 @@ class BartDecoderLayer(nn.Module):
         self.activation_fn = get_act_fn(config.activation_function)
 
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
-        '''
+        """
         afeldman-nm: personally I would call this "cross-attention",
         however I left the name as "encoder_attn" to maintain consistency
         with the name of the pretrained weights.
-        '''
+        """
         self.encoder_attn = BartCrossAttention(
             self.embed_dim,
             config.decoder_attention_heads,
@@ -546,13 +566,15 @@ class BartEncoder(nn.Module):
         embed_tokens (nn.Embedding): output embedding
     """
 
-    def __init__(self,
-                 config: BartConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 lora_config: Optional[LoRAConfig] = None,
-                 embed_tokens: Optional[nn.Embedding] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        config: BartConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
+        embed_tokens: Optional[nn.Embedding] = None,
+        prefix: str = "",
+    ):
         super().__init__()
 
         self.cache_config = cache_config
@@ -562,9 +584,9 @@ class BartEncoder(nn.Module):
         self.max_source_positions = config.max_position_embeddings
         embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
 
-        self.embed_tokens = BartScaledWordEmbedding(config.vocab_size,
-                                                    embed_dim,
-                                                    embed_scale=embed_scale)
+        self.embed_tokens = BartScaledWordEmbedding(
+            config.vocab_size, embed_dim, embed_scale=embed_scale
+        )
 
         if embed_tokens is not None:
             self.embed_tokens.weight = embed_tokens.weight
@@ -573,13 +595,17 @@ class BartEncoder(nn.Module):
             config.max_position_embeddings,
             embed_dim,
         )
-        self.layers = nn.ModuleList([
-            BartEncoderLayer(config,
-                             cache_config,
-                             quant_config,
-                             prefix=f"{prefix}.layers.{layer_idx}")
-            for layer_idx in range(config.encoder_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                BartEncoderLayer(
+                    config,
+                    cache_config,
+                    quant_config,
+                    prefix=f"{prefix}.layers.{layer_idx}",
+                )
+                for layer_idx in range(config.encoder_layers)
+            ]
+        )
 
         self.layernorm_embedding = nn.LayerNorm(embed_dim)
 
@@ -639,12 +665,11 @@ class BartDecoder(nn.Module):
         self.quant_config = quant_config
         self.lora_config = lora_config
         self.max_target_positions = config.max_position_embeddings
-        embed_scale = math.sqrt(
-            config.d_model) if config.scale_embedding else 1.0
+        embed_scale = math.sqrt(config.d_model) if config.scale_embedding else 1.0
 
-        self.embed_tokens = BartScaledWordEmbedding(config.vocab_size,
-                                                    config.d_model,
-                                                    embed_scale=embed_scale)
+        self.embed_tokens = BartScaledWordEmbedding(
+            config.vocab_size, config.d_model, embed_scale=embed_scale
+        )
 
         if embed_tokens is not None:
             self.embed_tokens.weight = embed_tokens.weight
@@ -655,9 +680,16 @@ class BartDecoder(nn.Module):
         )
 
         self.layers = nn.ModuleList(
-            [BartDecoderLayer(config,cache_config,quant_config,
-            prefix=f"{prefix}.layers.{layer_idx}") \
-             for layer_idx in range(config.decoder_layers)])
+            [
+                BartDecoderLayer(
+                    config,
+                    cache_config,
+                    quant_config,
+                    prefix=f"{prefix}.layers.{layer_idx}",
+                )
+                for layer_idx in range(config.decoder_layers)
+            ]
+        )
 
         self.layernorm_embedding = nn.LayerNorm(config.d_model)
 
@@ -720,23 +752,28 @@ class BartModel(nn.Module, SupportsQuant):
 
         self.config = config
 
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
+        lora_vocab = (
+            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
+            if lora_config
+            else 0
+        )
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
 
-        self.encoder = BartEncoder(config,
-                                   cache_config,
-                                   quant_config=quant_config,
-                                   prefix=f"{prefix}.encoder")
-        self.decoder = BartDecoder(config,
-                                   cache_config,
-                                   quant_config=quant_config,
-                                   prefix=f"{prefix}.decoder")
+        self.encoder = BartEncoder(
+            config, cache_config, quant_config=quant_config, prefix=f"{prefix}.encoder"
+        )
+        self.decoder = BartDecoder(
+            config, cache_config, quant_config=quant_config, prefix=f"{prefix}.decoder"
+        )
 
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
-                encoder_input_ids: torch.Tensor,
-                encoder_positions: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        encoder_input_ids: torch.Tensor,
+        encoder_positions: torch.Tensor,
+    ) -> torch.Tensor:
         r"""
         Args:
             input_ids
@@ -758,20 +795,21 @@ class BartModel(nn.Module, SupportsQuant):
         if encoder_input_ids.numel() > 0:
             # Run encoder attention if a non-zero number of encoder tokens
             # are provided as input
-            encoder_hidden_states = self.encoder(input_ids=encoder_input_ids,
-                                                 positions=encoder_positions)
+            encoder_hidden_states = self.encoder(
+                input_ids=encoder_input_ids, positions=encoder_positions
+            )
 
         # decoder outputs consists of
         # (dec_features, past_key_value, dec_hidden, dec_attn)
         decoder_outputs = self.decoder(
             decoder_input_ids=input_ids,
             decoder_positions=positions,
-            encoder_hidden_states=encoder_hidden_states)
+            encoder_hidden_states=encoder_hidden_states,
+        )
 
         return decoder_outputs
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -784,7 +822,7 @@ class BartModel(nn.Module, SupportsQuant):
         model_params_dict = dict(self.named_parameters())
 
         for name, loaded_weight in weights:
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
@@ -805,13 +843,154 @@ class BartModel(nn.Module, SupportsQuant):
         return loaded_params
 
 
-class BartForConditionalGeneration(nn.Module, SupportsQuant,
-                                   SupportsMultiModal):
+class BartProcessingInfo(BaseProcessingInfo):
+    """Processing information for BART encoder-decoder models."""
+
+    def get_hf_config(self) -> BartConfig:
+        return self.ctx.get_hf_config(BartConfig)
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        # BART's encoder input is treated as a "text" modality
+        # Like BART, mBART just has text for both encoder and decoder
+        return {"text": 1}
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Optional[Mapping[str, int]]:
+        # For BART, the encoder can handle up to max_position_embeddings tokens
+        # Return this directly to avoid complex profiling
+        config = self.get_hf_config()
+        return {"text": config.max_position_embeddings}
+
+
+class BartDummyInputsBuilder(BaseDummyInputsBuilder[BartProcessingInfo]):
+    """Builds dummy inputs for profiling BART models."""
+
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        # For BART, the decoder prompt is separate from encoder
+        # Return minimal dummy text for decoder
+        return ""
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+    ) -> MultiModalDataDict:
+        # Return dummy encoder text for profiling
+        num_texts = mm_counts.get("text", 0)
+        if num_texts == 0:
+            return {}
+
+        # Create dummy encoder text of appropriate length
+        # Use simple repeated words for profiling
+        dummy_text = " ".join(["word"] * seq_len)
+        return {"text": dummy_text}
+
+
+class BartMultiModalProcessor(EncDecMultiModalProcessor[BartProcessingInfo]):
+    """Multimodal processor for BART encoder-decoder models."""
+
+    def create_encoder_prompt(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+    ) -> Union[str, list[int]]:
+        # For BART, we create a dummy encoder prompt with a single placeholder token
+        # This will be replaced by the actual encoder tokens via prompt updates
+        # Similar to Whisper's approach
+        return [0]
+
+    def create_decoder_prompt(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+    ) -> Union[str, list[int]]:
+        # The decoder prompt is the original prompt
+        return prompt
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ):
+        """
+        BART doesn't have a HuggingFace Processor - it only has a tokenizer.
+        We tokenize the text directly using the tokenizer.
+        """
+        from transformers.feature_extraction_utils import BatchFeature
+
+        tokenizer = self.info.get_tokenizer()
+
+        # Tokenize the prompt text
+        tokenized = tokenizer(
+            prompt,
+            add_special_tokens=False,
+            return_tensors="pt",  # Return PyTorch tensors
+            **tok_kwargs,
+        )
+
+        return BatchFeature(tokenized)
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        # For BART, input_ids from tokenization are the encoder input
+        # We don't have separate multimodal features, just return empty
+        # The input_ids will be used as encoder input automatically
+        return {}
+
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargsItems,
+    ) -> Sequence[PromptUpdate]:
+        from vllm.multimodal.processing import PromptReplacement
+
+        # Get the number of text items to determine token count
+        # For BART, we need to replace the placeholder [0] with the actual
+        # number of encoder tokens from the text
+        num_text_items = mm_items.get_count("text", strict=False)
+
+        if num_text_items == 0:
+            return []
+
+        # Get the tokenized length - we'll use the input_ids from out_mm_kwargs
+        # to determine how many tokens the text actually has
+        text_items = mm_items.get_items("text", TextProcessorItems)
+        tokenizer = self.info.get_tokenizer()
+
+        # Tokenize the first text item to get the number of tokens
+        text = text_items.get(0)
+        num_tokens = len(tokenizer.encode(text, add_special_tokens=False))
+
+        return [
+            PromptReplacement(
+                modality="text",
+                target=[0],
+                replacement=[0] * num_tokens,
+            )
+        ]
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    BartMultiModalProcessor,
+    info=BartProcessingInfo,
+    dummy_inputs=BartDummyInputsBuilder,
+)
+class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "decoder.": "model.decoder.",
             "encoder.": "model.encoder.",
-            "shared.": "model.shared."
+            "shared.": "model.shared.",
         },
         orig_to_new_substr={
             "beta": "bias",
@@ -821,28 +1000,28 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant,
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-
         super().__init__()
         config = vllm_config.model_config.hf_config
         lora_config = vllm_config.lora_config
         # currently all existing BART models have `tie_word_embeddings` enabled
         assert config.tie_word_embeddings
         self.config = config
-        self.model = BartModel(vllm_config=vllm_config,
-                               prefix=maybe_prefix(prefix, "model"))
+        self.model = BartModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
 
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
 
-        embed_scale = math.sqrt(
-            config.d_model) if config.scale_embedding else 1.0
+        embed_scale = math.sqrt(config.d_model) if config.scale_embedding else 1.0
 
-        self.lm_head = BartParallelLMHead(config.vocab_size,
-                                          config.d_model,
-                                          embed_scale=embed_scale)
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size)
+        self.lm_head = BartParallelLMHead(
+            config.vocab_size, config.d_model, embed_scale=embed_scale
+        )
+        self.logits_processor = LogitsProcessor(
+            self.unpadded_vocab_size, config.vocab_size
+        )
 
     def get_language_model(self) -> nn.Module:
         return self.model.decoder
@@ -880,8 +1059,7 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant,
         Returns:
             Output torch.Tensor
         """
-        return self.model(input_ids, positions, encoder_input_ids,
-                          encoder_positions)
+        return self.model(input_ids, positions, encoder_input_ids, encoder_positions)
 
     def compute_logits(
         self,
@@ -890,44 +1068,48 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant,
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights_tuple_list = list(weights)
 
         shared_embedding_weight = None
         for name, loaded_weight in weights_tuple_list:
-            if ('shared.weight' in name
-                    or 'encoder.embed_tokens.weight' in name
-                    or 'decoder.embed_tokens.weight' in name
-                    or 'lm_head.weight' in name):
-                assert shared_embedding_weight is None, (
-                    "Conflicting embedding weights.")
+            if (
+                "shared.weight" in name
+                or "encoder.embed_tokens.weight" in name
+                or "decoder.embed_tokens.weight" in name
+                or "lm_head.weight" in name
+            ):
+                assert shared_embedding_weight is None, "Conflicting embedding weights."
                 shared_embedding_weight = loaded_weight
 
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["cls.", "pooler."]),
         )
-        loaded_params = loader.load_weights(weights_tuple_list,
-                                            mapper=self.hf_to_vllm_mapper)
+        loaded_params = loader.load_weights(
+            weights_tuple_list, mapper=self.hf_to_vllm_mapper
+        )
 
         if shared_embedding_weight is not None:
-            weight_loader = getattr(self.lm_head.weight, "weight_loader",
-                                    default_weight_loader)
+            weight_loader = getattr(
+                self.lm_head.weight, "weight_loader", default_weight_loader
+            )
             weight_loader(self.lm_head.weight, shared_embedding_weight)
 
             self.model.encoder.embed_tokens.weight = self.lm_head.weight
             self.model.decoder.embed_tokens.weight = self.lm_head.weight
-            loaded_params.update({
-                'model.encoder.embed_tokens.weight', 'lm_head.weight',
-                'model.decoder.embed_tokens.weight'
-            })
+            loaded_params.update(
+                {
+                    "model.encoder.embed_tokens.weight",
+                    "lm_head.weight",
+                    "model.decoder.embed_tokens.weight",
+                }
+            )
 
         return loaded_params
 
 
 class MBartEncoderLayer(BartEncoderLayer):
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         r"""
         Args:
@@ -952,15 +1134,14 @@ class MBartEncoderLayer(BartEncoderLayer):
         hidden_states = residual + hidden_states
 
         if hidden_states.dtype == torch.float16 and (
-                torch.isinf(hidden_states).any()
-                or torch.isnan(hidden_states).any()):
+            torch.isinf(hidden_states).any() or torch.isnan(hidden_states).any()
+        ):
             hidden_states = cast_overflow_tensors(hidden_states)
 
         return hidden_states
 
 
 class MBartDecoderLayer(BartDecoderLayer):
-
     def forward(
         self,
         decoder_hidden_states: torch.Tensor,
@@ -1008,13 +1189,15 @@ class MBartEncoder(nn.Module):
         embed_tokens (nn.Embedding): output embedding
     """
 
-    def __init__(self,
-                 config: BartConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 lora_config: Optional[LoRAConfig] = None,
-                 embed_tokens: Optional[nn.Embedding] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        config: BartConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
+        embed_tokens: Optional[nn.Embedding] = None,
+        prefix: str = "",
+    ):
         super().__init__()
 
         self.cache_config = cache_config
@@ -1024,9 +1207,9 @@ class MBartEncoder(nn.Module):
         self.max_source_positions = config.max_position_embeddings
         embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
 
-        self.embed_tokens = BartScaledWordEmbedding(config.vocab_size,
-                                                    embed_dim,
-                                                    embed_scale=embed_scale)
+        self.embed_tokens = BartScaledWordEmbedding(
+            config.vocab_size, embed_dim, embed_scale=embed_scale
+        )
 
         if embed_tokens is not None:
             self.embed_tokens.weight = embed_tokens.weight
@@ -1035,13 +1218,17 @@ class MBartEncoder(nn.Module):
             config.max_position_embeddings,
             embed_dim,
         )
-        self.layers = nn.ModuleList([
-            MBartEncoderLayer(config,
-                              cache_config,
-                              quant_config,
-                              prefix=f"{prefix}.layers.{layer_idx}")
-            for layer_idx in range(config.encoder_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                MBartEncoderLayer(
+                    config,
+                    cache_config,
+                    quant_config,
+                    prefix=f"{prefix}.layers.{layer_idx}",
+                )
+                for layer_idx in range(config.encoder_layers)
+            ]
+        )
 
         self.layernorm_embedding = nn.LayerNorm(embed_dim)
         self.layer_norm = nn.LayerNorm(config.d_model)  # 改动
@@ -1103,12 +1290,11 @@ class MBartDecoder(nn.Module):
         self.quant_config = quant_config
         self.lora_config = lora_config
         self.max_target_positions = config.max_position_embeddings
-        embed_scale = math.sqrt(
-            config.d_model) if config.scale_embedding else 1.0
+        embed_scale = math.sqrt(config.d_model) if config.scale_embedding else 1.0
 
-        self.embed_tokens = BartScaledWordEmbedding(config.vocab_size,
-                                                    config.d_model,
-                                                    embed_scale=embed_scale)
+        self.embed_tokens = BartScaledWordEmbedding(
+            config.vocab_size, config.d_model, embed_scale=embed_scale
+        )
 
         if embed_tokens is not None:
             self.embed_tokens.weight = embed_tokens.weight
@@ -1119,9 +1305,16 @@ class MBartDecoder(nn.Module):
         )
 
         self.layers = nn.ModuleList(
-            [MBartDecoderLayer(config, cache_config, quant_config,
-                               prefix=f"{prefix}.layers.{layer_idx}") \
-             for layer_idx in range(config.decoder_layers)])
+            [
+                MBartDecoderLayer(
+                    config,
+                    cache_config,
+                    quant_config,
+                    prefix=f"{prefix}.layers.{layer_idx}",
+                )
+                for layer_idx in range(config.decoder_layers)
+            ]
+        )
 
         self.layernorm_embedding = nn.LayerNorm(config.d_model)
         self.layer_norm = nn.LayerNorm(config.d_model)
@@ -1171,9 +1364,7 @@ class MBartDecoder(nn.Module):
 
 
 class MBartModel(nn.Module, SupportsQuant):
-    _tied_weights_keys = [
-        "encoder.embed_tokens.weight", "decoder.embed_tokens.weight"
-    ]
+    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1185,23 +1376,28 @@ class MBartModel(nn.Module, SupportsQuant):
 
         self.config = config
 
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
+        lora_vocab = (
+            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
+            if lora_config
+            else 0
+        )
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
 
-        self.encoder = MBartEncoder(config,
-                                    cache_config,
-                                    quant_config=quant_config,
-                                    prefix=f"{prefix}.encoder")
-        self.decoder = MBartDecoder(config,
-                                    cache_config,
-                                    quant_config=quant_config,
-                                    prefix=f"{prefix}.decoder")
+        self.encoder = MBartEncoder(
+            config, cache_config, quant_config=quant_config, prefix=f"{prefix}.encoder"
+        )
+        self.decoder = MBartDecoder(
+            config, cache_config, quant_config=quant_config, prefix=f"{prefix}.decoder"
+        )
 
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
-                encoder_input_ids: torch.Tensor,
-                encoder_positions: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        encoder_input_ids: torch.Tensor,
+        encoder_positions: torch.Tensor,
+    ) -> torch.Tensor:
         r"""
         Args:
             input_ids
@@ -1223,27 +1419,171 @@ class MBartModel(nn.Module, SupportsQuant):
         if encoder_input_ids.numel() > 0:
             # Run encoder attention if a non-zero number of encoder tokens
             # are provided as input
-            encoder_hidden_states = self.encoder(input_ids=encoder_input_ids,
-                                                 positions=encoder_positions)
+            encoder_hidden_states = self.encoder(
+                input_ids=encoder_input_ids, positions=encoder_positions
+            )
 
         # decoder outputs consists of
         # (dec_features, past_key_value, dec_hidden, dec_attn)
         decoder_outputs = self.decoder(
             decoder_input_ids=input_ids,
             decoder_positions=positions,
-            encoder_hidden_states=encoder_hidden_states)
+            encoder_hidden_states=encoder_hidden_states,
+        )
 
         return decoder_outputs
 
 
-class MBartForConditionalGeneration(nn.Module, SupportsQuant):
+class MBartProcessingInfo(BaseProcessingInfo):
+    """Processing information for mBART encoder-decoder models."""
+
+    def get_hf_config(self) -> BartConfig:
+        return self.ctx.get_hf_config(BartConfig)
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        # mBART's encoder input is treated as a "text" modality
+        # Like BART, mBART just has text for both encoder and decoder
+        return {"text": 1}
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Optional[Mapping[str, int]]:
+        # For mBART, the encoder can handle up to max_position_embeddings tokens
+        # Return this directly to avoid complex profiling
+        config = self.get_hf_config()
+        return {"text": config.max_position_embeddings}
+
+
+class MBartDummyInputsBuilder(BaseDummyInputsBuilder[MBartProcessingInfo]):
+    """Builds dummy inputs for profiling mBART models."""
+
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        # For mBART, the decoder prompt is separate from encoder
+        # Return minimal dummy text for decoder
+        return ""
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+    ) -> MultiModalDataDict:
+        # Return dummy encoder text for profiling
+        num_texts = mm_counts.get("text", 0)
+        if num_texts == 0:
+            return {}
+
+        # Create dummy encoder text of appropriate length
+        # Use simple repeated words for profiling
+        dummy_text = " ".join(["word"] * seq_len)
+        return {"text": dummy_text}
+
+
+class MBartMultiModalProcessor(EncDecMultiModalProcessor[MBartProcessingInfo]):
+    """Multimodal processor for mBART encoder-decoder models."""
+
+    def create_encoder_prompt(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+    ) -> Union[str, list[int]]:
+        # For mBART, we create a dummy encoder prompt with a single placeholder token
+        # This will be replaced by the actual encoder tokens via prompt updates
+        # Similar to Whisper's approach
+        return [0]
+
+    def create_decoder_prompt(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+    ) -> Union[str, list[int]]:
+        # The decoder prompt is the original prompt
+        return prompt
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ):
+        """
+        mBART doesn't have a HuggingFace Processor - it only has a tokenizer.
+        We tokenize the text directly using the tokenizer.
+        """
+        from transformers.feature_extraction_utils import BatchFeature
+
+        tokenizer = self.info.get_tokenizer()
+
+        # Tokenize the prompt text
+        tokenized = tokenizer(
+            prompt,
+            add_special_tokens=False,
+            return_tensors="pt",  # Return PyTorch tensors
+            **tok_kwargs,
+        )
+
+        return BatchFeature(tokenized)
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        # For mBART, input_ids from tokenization are the encoder input
+        # We don't have separate multimodal features, just return empty
+        # The input_ids will be used as encoder input automatically
+        return {}
+
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargsItems,
+    ) -> Sequence[PromptUpdate]:
+        from vllm.multimodal.processing import PromptReplacement
+
+        # Get the number of text items to determine token count
+        # For mBART, we need to replace the placeholder [0] with the actual
+        # number of encoder tokens from the text
+        num_text_items = mm_items.get_count("text", strict=False)
+
+        if num_text_items == 0:
+            return []
+
+        # Get the tokenized length - we'll use the input_ids from out_mm_kwargs
+        # to determine how many tokens the text actually has
+        text_items = mm_items.get_items("text", TextProcessorItems)
+        tokenizer = self.info.get_tokenizer()
+
+        # Tokenize the first text item to get the number of tokens
+        text = text_items.get(0)
+        num_tokens = len(tokenizer.encode(text, add_special_tokens=False))
+
+        return [
+            PromptReplacement(
+                modality="text",
+                target=[0],
+                replacement=[0] * num_tokens,
+            )
+        ]
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    MBartMultiModalProcessor,
+    info=MBartProcessingInfo,
+    dummy_inputs=MBartDummyInputsBuilder,
+)
+class MBartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal):
     base_model_prefix = "model"
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "decoder.": "model.decoder.",
             "encoder.": "model.encoder.",
-            "shared.": "model.shared."
+            "shared.": "model.shared.",
         },
         orig_to_new_substr={
             "beta": "bias",
@@ -1258,22 +1598,23 @@ class MBartForConditionalGeneration(nn.Module, SupportsQuant):
         lora_config = vllm_config.lora_config
         assert config.tie_word_embeddings
         self.config = config
-        self.model = MBartModel(vllm_config=vllm_config,
-                                prefix=maybe_prefix(prefix, "model"))
+        self.model = MBartModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
 
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
 
-        embed_scale = math.sqrt(
-            config.d_model) if config.scale_embedding else 1.0
+        embed_scale = math.sqrt(config.d_model) if config.scale_embedding else 1.0
 
-        self.lm_head = BartParallelLMHead(config.vocab_size,
-                                          config.d_model,
-                                          embed_scale=embed_scale)
+        self.lm_head = BartParallelLMHead(
+            config.vocab_size, config.d_model, embed_scale=embed_scale
+        )
 
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size)
+        self.logits_processor = LogitsProcessor(
+            self.unpadded_vocab_size, config.vocab_size
+        )
 
     def forward(
         self,
@@ -1285,8 +1626,7 @@ class MBartForConditionalGeneration(nn.Module, SupportsQuant):
         encoder_positions: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        return self.model(input_ids, positions, encoder_input_ids,
-                          encoder_positions)
+        return self.model(input_ids, positions, encoder_input_ids, encoder_positions)
 
     def compute_logits(
         self,
@@ -1295,8 +1635,7 @@ class MBartForConditionalGeneration(nn.Module, SupportsQuant):
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
@@ -1308,13 +1647,16 @@ class MBartForConditionalGeneration(nn.Module, SupportsQuant):
         shared_embedding_weight = None
 
         for name, loaded_weight in weights:
-            if any(skip in name
-                   for skip in ["cls.", "pooler.", "final_logits_bias"]):
+            if any(skip in name for skip in ["cls.", "pooler.", "final_logits_bias"]):
                 continue
-            if any(embed_name in name for embed_name in [
-                    'shared.weight', 'encoder.embed_tokens.weight',
-                    'decoder.embed_tokens.weight'
-            ]):
+            if any(
+                embed_name in name
+                for embed_name in [
+                    "shared.weight",
+                    "encoder.embed_tokens.weight",
+                    "decoder.embed_tokens.weight",
+                ]
+            ):
                 if shared_embedding_weight is None:
                     shared_embedding_weight = loaded_weight
                 continue
@@ -1323,19 +1665,18 @@ class MBartForConditionalGeneration(nn.Module, SupportsQuant):
                 if weight_name not in name:
                     continue
                 vllm_name = name
-                for src, dst in self.hf_to_vllm_mapper.orig_to_new_substr.items(
-                ):
+                for src, dst in self.hf_to_vllm_mapper.orig_to_new_substr.items():
                     vllm_name = vllm_name.replace(src, dst)
-                for src, dst in self.hf_to_vllm_mapper.orig_to_new_prefix.items(
-                ):
+                for src, dst in self.hf_to_vllm_mapper.orig_to_new_prefix.items():
                     if vllm_name.startswith(src):
-                        vllm_name = dst + vllm_name[len(src):]
+                        vllm_name = dst + vllm_name[len(src) :]
                         break
                 vllm_name = vllm_name.replace(weight_name, param_name)
                 if vllm_name in model_params_dict:
                     param = model_params_dict[vllm_name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(param, loaded_weight, shard_id)
                     loaded_params.add(vllm_name)
                 is_stacked = True
@@ -1343,18 +1684,23 @@ class MBartForConditionalGeneration(nn.Module, SupportsQuant):
             if not is_stacked:
                 remaining_weights.append((name, loaded_weight))
         loader = AutoWeightsLoader(self, skip_prefixes=["cls.", "pooler."])
-        auto_loaded_params = loader.load_weights(remaining_weights,
-                                                 mapper=self.hf_to_vllm_mapper)
+        auto_loaded_params = loader.load_weights(
+            remaining_weights, mapper=self.hf_to_vllm_mapper
+        )
         loaded_params.update(auto_loaded_params)
         if shared_embedding_weight is not None:
             lm_head_param = self.lm_head.weight
-            weight_loader = getattr(lm_head_param, "weight_loader",
-                                    default_weight_loader)
+            weight_loader = getattr(
+                lm_head_param, "weight_loader", default_weight_loader
+            )
             weight_loader(lm_head_param, shared_embedding_weight)
             self.model.encoder.embed_tokens.weight = self.lm_head.weight
             self.model.decoder.embed_tokens.weight = self.lm_head.weight
-            loaded_params.update({
-                'model.encoder.embed_tokens.weight', 'lm_head.weight',
-                'model.decoder.embed_tokens.weight'
-            })
+            loaded_params.update(
+                {
+                    "model.encoder.embed_tokens.weight",
+                    "lm_head.weight",
+                    "model.decoder.embed_tokens.weight",
+                }
+            )
         return loaded_params
