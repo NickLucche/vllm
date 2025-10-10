@@ -920,31 +920,50 @@ class BartMultiModalProcessor(EncDecMultiModalProcessor[BartProcessingInfo]):
     ):
         """
         BART doesn't have a HuggingFace Processor - it only has a tokenizer.
-        We tokenize the text directly using the tokenizer.
+        We tokenize both the prompt (decoder) and encoder text from mm_data.
         """
         from transformers.feature_extraction_utils import BatchFeature
 
         tokenizer = self.info.get_tokenizer()
 
-        # Tokenize the prompt text
-        tokenized = tokenizer(
-            prompt,
+        # For BART encoder-decoder: check if we have encoder text data
+        has_encoder_data = mm_data and "texts" in mm_data
+        logger.info("mm_data: %s", mm_data)
+
+        result = {}
+
+        if has_encoder_data:
+            # Tokenize the encoder text from mm_data
+            encoder_texts = mm_data["texts"]
+            encoder_text = encoder_texts[0] if encoder_texts else ""
+            encoder_tokenized = tokenizer(
+                encoder_text,
+                add_special_tokens=False,
+                return_tensors="pt",
+                **tok_kwargs,
+            )
+            result["encoder_input_ids"] = encoder_tokenized["input_ids"]
+
+        # Always tokenize the prompt (for decoder or as dummy)
+        # This will be popped by the base class
+        prompt_tokenized = tokenizer(
+            prompt if prompt else "",
             add_special_tokens=False,
-            return_tensors="pt",  # Return PyTorch tensors
+            return_tensors="pt",
             **tok_kwargs,
         )
+        result["input_ids"] = prompt_tokenized["input_ids"]
 
-        return BatchFeature(tokenized)
+        return BatchFeature(result)
 
     def _get_mm_fields_config(
         self,
         hf_inputs,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        # For BART, input_ids from tokenization are the encoder input
-        # We don't have separate multimodal features, just return empty
-        # The input_ids will be used as encoder input automatically
-        return {}
+        # For BART, encoder_input_ids from tokenization are the encoder input
+        # and should be treated as multimodal kwargs for the "text" modality
+        return dict(encoder_input_ids=MultiModalFieldConfig.batched("text"))
 
     def _get_prompt_updates(
         self,
@@ -1027,7 +1046,45 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
         return self.model.decoder
 
     def get_multimodal_embeddings(self, **kwargs) -> MultiModalEmbeddings:
-        raise NotImplementedError()
+        # Required as part of SupportsMultiModal interface.
+        # For BART, we parse the encoder_input_ids and return encoder outputs
+        encoder_input = self._parse_and_validate_encoder_input(**kwargs)
+        encoder_input_ids = encoder_input["encoder_input_ids"]
+
+        # Squeeze all dimensions of size 1 to get 1D tensor
+        # encoder_input_ids comes in as [1, 1, seq_len] and needs to be [seq_len]
+        encoder_input_ids = encoder_input_ids.squeeze()
+
+        # Create positions for encoder input (1D tensor)
+        encoder_positions = torch.arange(
+            encoder_input_ids.size(0),
+            dtype=torch.long,
+            device=encoder_input_ids.device,
+        )
+
+        return [
+            self.model.encoder(
+                input_ids=encoder_input_ids,
+                positions=encoder_positions,
+            )
+        ]
+
+    def _parse_and_validate_encoder_input(
+        self, **kwargs: object
+    ) -> dict[str, torch.Tensor]:
+        encoder_input_ids = kwargs.get("encoder_input_ids")
+
+        if encoder_input_ids is not None:
+            if not isinstance(encoder_input_ids, (torch.Tensor, list)):
+                raise ValueError(
+                    "Incorrect type of encoder input_ids. "
+                    f"Got type: {type(encoder_input_ids)}"
+                )
+            # Concatenate all encoder inputs into a single tensor
+            if isinstance(encoder_input_ids, list):
+                encoder_input_ids = torch.cat(encoder_input_ids)
+
+        return {"encoder_input_ids": encoder_input_ids}
 
     def get_input_embeddings(
         self,
@@ -1041,9 +1098,6 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-        *,
-        encoder_input_ids: torch.Tensor,
-        encoder_positions: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
         r"""
@@ -1052,13 +1106,35 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
                 torch.Tensor of *decoder* input token ids.
             positions
                 torch.Tensor of *decoder* position indices.
-            encoder_input_ids
+        Keyword Args:
+            encoder_input_ids (optional)
                 torch.Tensor of *encoder* input token ids.
-            encoder_positions
+            encoder_positions (optional)
                 torch.Tensor of *encoder* position indices
         Returns:
             Output torch.Tensor
         """
+        encoder_input = self._parse_and_validate_encoder_input(**kwargs)
+        encoder_input_ids = encoder_input["encoder_input_ids"]
+
+        # Create encoder positions if we have encoder input
+        if encoder_input_ids is not None:
+            # Squeeze all dimensions of size 1 to get 1D tensor
+            encoder_input_ids = encoder_input_ids.squeeze()
+            encoder_positions = torch.arange(
+                encoder_input_ids.size(0),
+                dtype=torch.long,
+                device=encoder_input_ids.device,
+            )
+        else:
+            # Create empty tensors if no encoder input
+            encoder_positions = torch.tensor(
+                [], dtype=torch.long, device=input_ids.device
+            )
+            encoder_input_ids = torch.tensor(
+                [], dtype=torch.long, device=input_ids.device
+            )
+
         return self.model(input_ids, positions, encoder_input_ids, encoder_positions)
 
     def compute_logits(

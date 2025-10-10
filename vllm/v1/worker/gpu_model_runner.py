@@ -1887,19 +1887,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         Format model_args with encoder_input_ids and encoder_positions for
         text-only encoder-decoder models.
-        
+
         Otherwise, extract multimodal input features from scheduled encoder
         inputs and formats them for the encoder-decoder model forward pass.
         """
 
-        if not self.supports_mm_inputs:
-            logger.info("encoder inputs: %s",
-                        scheduler_output.scheduled_encoder_inputs)
-            # TODO fix this
-            return {}
-
         # Batch the multi-modal inputs using the helper method.
         mm_kwargs, _ = self._batch_mm_kwargs_from_scheduler(scheduler_output)
+        logger.info("mm_kwargs in _extract_encoder_inputs(): %s", mm_kwargs)
 
         if not mm_kwargs:
             return {}
@@ -3412,15 +3407,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 inputs_embeds = None
 
             # Add encoder inputs for text-only encoder-decoder models
-            if (self.model_config.is_encoder_decoder
-                    and not self.supports_mm_inputs):
+            if self.model_config.is_encoder_decoder and not self.supports_mm_inputs:
                 # TODO This is not the correct encoder input
-                model_kwargs.update({
-                    'encoder_input_ids':
-                    self.input_ids.gpu[:num_tokens],
-                    'encoder_positions':
-                    self.positions.gpu[:num_tokens],
-                })
+                model_kwargs.update(
+                    {
+                        "encoder_input_ids": self.input_ids.gpu[:num_tokens],
+                        "encoder_positions": self.positions.gpu[:num_tokens],
+                    }
+                )
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_after_padding]
