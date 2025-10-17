@@ -160,15 +160,15 @@ class KVOutputAggregator:
             # Allow the worker to dynamically update the expected number of
             # finished sending/recving for new requests
             if (
-                output.expected_finished_reqs > 0
-                and output.expected_finished_reqs != self._expected_finished_reqs
+                kv_output.expected_finished_reqs > 0
+                and kv_output.expected_finished_reqs != self._expected_finished_reqs
             ):
                 logger.debug(
                     "Expected finished requests updated from %d to %d",
                     self._expected_finished_reqs,
-                    output.expected_finished_reqs,
+                    kv_output.expected_finished_reqs,
                 )
-                self._expected_finished_reqs = output.expected_finished_reqs
+                self._expected_finished_reqs = kv_output.expected_finished_reqs
 
             update_finished_set(
                 kv_output.finished_sending, self._send_remaining_count, finished_sending
