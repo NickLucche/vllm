@@ -22,7 +22,6 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -140,9 +139,9 @@ class BartEncoderAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         bias: bool = True,
-        config: Optional[BartConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        config: BartConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -226,9 +225,9 @@ class BartDecoderSelfAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         bias: bool = True,
-        config: Optional[BartConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        config: BartConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -308,9 +307,9 @@ class BartCrossAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         bias: bool = True,
-        config: Optional[BartConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        config: BartConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -373,7 +372,7 @@ class BartCrossAttention(nn.Module):
     def forward(
         self,
         decoder_hidden_states: torch.Tensor,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_hidden_states: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
 
@@ -389,8 +388,8 @@ class BartEncoderLayer(nn.Module):
     def __init__(
         self,
         config: BartConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -461,8 +460,8 @@ class BartDecoderLayer(nn.Module):
     def __init__(
         self,
         config: BartConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -513,7 +512,7 @@ class BartDecoderLayer(nn.Module):
     def forward(
         self,
         decoder_hidden_states: torch.Tensor,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_hidden_states: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r"""
         Args:
@@ -569,10 +568,10 @@ class BartEncoder(nn.Module):
     def __init__(
         self,
         config: BartConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-        embed_tokens: Optional[nn.Embedding] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        lora_config: LoRAConfig | None = None,
+        embed_tokens: nn.Embedding | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -613,7 +612,7 @@ class BartEncoder(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r"""
         Args:
@@ -654,10 +653,10 @@ class BartDecoder(nn.Module):
     def __init__(
         self,
         config: BartConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-        embed_tokens: Optional[nn.Embedding] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        lora_config: LoRAConfig | None = None,
+        embed_tokens: nn.Embedding | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -697,8 +696,8 @@ class BartDecoder(nn.Module):
         self,
         decoder_input_ids: torch.Tensor,
         decoder_positions: torch.Tensor,
-        encoder_hidden_states: Optional[torch.Tensor],
-        inputs_embeds: Optional[torch.Tensor] = None,
+        encoder_outputs: list[torch.Tensor],
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r"""
         Args:
@@ -713,6 +712,11 @@ class BartDecoder(nn.Module):
         Returns:
             Decoder output torch.Tensor
         """
+        assert len(encoder_outputs) in (0, 1)
+        encoder_hidden_states = (
+            encoder_outputs[0] if len(encoder_outputs) == 1 else None
+        )
+
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(decoder_input_ids)
         else:
@@ -771,8 +775,7 @@ class BartModel(nn.Module, SupportsQuant):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        encoder_input_ids: torch.Tensor,
-        encoder_positions: torch.Tensor,
+        encoder_outputs: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         r"""
         Args:
@@ -789,22 +792,15 @@ class BartModel(nn.Module, SupportsQuant):
         Returns:
             Model output torch.Tensor
         """
-
-        encoder_hidden_states = None
-
-        if encoder_input_ids.numel() > 0:
-            # Run encoder attention if a non-zero number of encoder tokens
-            # are provided as input
-            encoder_hidden_states = self.encoder(
-                input_ids=encoder_input_ids, positions=encoder_positions
-            )
+        if encoder_outputs is None:
+            encoder_outputs = []
 
         # decoder outputs consists of
         # (dec_features, past_key_value, dec_hidden, dec_attn)
         decoder_outputs = self.decoder(
             decoder_input_ids=input_ids,
             decoder_positions=positions,
-            encoder_hidden_states=encoder_hidden_states,
+            encoder_hidden_states=encoder_outputs,
         )
 
         return decoder_outputs
@@ -849,7 +845,7 @@ class BartProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> BartConfig:
         return self.ctx.get_hf_config(BartConfig)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # BART's encoder input is treated as a "text" modality
         # Like BART, mBART just has text for both encoder and decoder
         return {"text": 1}
@@ -858,7 +854,7 @@ class BartProcessingInfo(BaseProcessingInfo):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> Optional[Mapping[str, int]]:
+    ) -> Mapping[str, int] | None:
         # For BART, the encoder can handle up to max_position_embeddings tokens
         # Return this directly to avoid complex profiling
         config = self.get_hf_config()
@@ -877,7 +873,7 @@ class BartDummyInputsBuilder(BaseDummyInputsBuilder[BartProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         # Return dummy encoder text for profiling
         num_texts = mm_counts.get("text", 0)
@@ -895,19 +891,23 @@ class BartMultiModalProcessor(EncDecMultiModalProcessor[BartProcessingInfo]):
 
     def create_encoder_prompt(
         self,
-        prompt: Union[str, list[int]],
+        prompt: str | list[int],
         mm_data: MultiModalDataDict,
-    ) -> Union[str, list[int]]:
-        # For BART, we create a dummy encoder prompt with a single placeholder token
-        # This will be replaced by the actual encoder tokens via prompt updates
-        # Similar to Whisper's approach
-        return [0]
+    ) -> str | list[int]:
+        # This is called from input preprocessor with encoder-decoder prompts
+        # already split out
+        tokenizer = self.info.get_tokenizer()
+        return tokenizer(
+            prompt,
+            add_special_tokens=False,
+            return_tensors="pt",
+        )
 
     def create_decoder_prompt(
         self,
-        prompt: Union[str, list[int]],
+        prompt: str | list[int],
         mm_data: MultiModalDataDict,
-    ) -> Union[str, list[int]]:
+    ) -> str | list[int]:
         # The decoder prompt is the original prompt
         return prompt
 
@@ -1089,7 +1089,7 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: NestedTensors | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError()
 
@@ -1097,7 +1097,7 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
         **kwargs,
     ) -> torch.Tensor:
         r"""
@@ -1140,7 +1140,7 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -1221,7 +1221,7 @@ class MBartDecoderLayer(BartDecoderLayer):
     def forward(
         self,
         decoder_hidden_states: torch.Tensor,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_hidden_states: torch.Tensor | None = None,
     ) -> torch.Tensor:
         residual = decoder_hidden_states
         hidden_states = self.self_attn_layer_norm(decoder_hidden_states)
@@ -1268,10 +1268,10 @@ class MBartEncoder(nn.Module):
     def __init__(
         self,
         config: BartConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-        embed_tokens: Optional[nn.Embedding] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        lora_config: LoRAConfig | None = None,
+        embed_tokens: nn.Embedding | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -1313,7 +1313,7 @@ class MBartEncoder(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r"""
         Args:
@@ -1355,10 +1355,10 @@ class MBartDecoder(nn.Module):
     def __init__(
         self,
         config: BartConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-        embed_tokens: Optional[nn.Embedding] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        lora_config: LoRAConfig | None = None,
+        embed_tokens: nn.Embedding | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -1399,8 +1399,8 @@ class MBartDecoder(nn.Module):
         self,
         decoder_input_ids: torch.Tensor,
         decoder_positions: torch.Tensor,
-        encoder_hidden_states: Optional[torch.Tensor],
-        inputs_embeds: Optional[torch.Tensor] = None,
+        encoder_hidden_states: torch.Tensor | None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r"""
         Args:
@@ -1516,7 +1516,7 @@ class MBartProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> BartConfig:
         return self.ctx.get_hf_config(BartConfig)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # mBART's encoder input is treated as a "text" modality
         # Like BART, mBART just has text for both encoder and decoder
         return {"text": 1}
@@ -1525,7 +1525,7 @@ class MBartProcessingInfo(BaseProcessingInfo):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> Optional[Mapping[str, int]]:
+    ) -> Mapping[str, int] | None:
         # For mBART, the encoder can handle up to max_position_embeddings tokens
         # Return this directly to avoid complex profiling
         config = self.get_hf_config()
@@ -1544,7 +1544,7 @@ class MBartDummyInputsBuilder(BaseDummyInputsBuilder[MBartProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         # Return dummy encoder text for profiling
         num_texts = mm_counts.get("text", 0)
@@ -1562,9 +1562,9 @@ class MBartMultiModalProcessor(EncDecMultiModalProcessor[MBartProcessingInfo]):
 
     def create_encoder_prompt(
         self,
-        prompt: Union[str, list[int]],
+        prompt: str | list[int],
         mm_data: MultiModalDataDict,
-    ) -> Union[str, list[int]]:
+    ) -> str | list[int]:
         # For mBART, we create a dummy encoder prompt with a single placeholder token
         # This will be replaced by the actual encoder tokens via prompt updates
         # Similar to Whisper's approach
@@ -1572,9 +1572,9 @@ class MBartMultiModalProcessor(EncDecMultiModalProcessor[MBartProcessingInfo]):
 
     def create_decoder_prompt(
         self,
-        prompt: Union[str, list[int]],
+        prompt: str | list[int],
         mm_data: MultiModalDataDict,
-    ) -> Union[str, list[int]]:
+    ) -> str | list[int]:
         # The decoder prompt is the original prompt
         return prompt
 
@@ -1696,7 +1696,7 @@ class MBartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
         *,
         encoder_input_ids: torch.Tensor,
         encoder_positions: torch.Tensor,
@@ -1707,7 +1707,7 @@ class MBartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
