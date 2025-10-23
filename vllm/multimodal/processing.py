@@ -1923,6 +1923,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             all(update_idx is not None for update_idx in update_idxs)
             for update_idxs in match_result.values()
         ):
+            logger.info("DEBUG -- tokenizer: %s, token_ids: %s", tokenizer, token_ids)
             new_text, match_result = self._apply_text_matches(
                 decode_tokens(tokenizer, token_ids),
                 mm_prompt_updates,

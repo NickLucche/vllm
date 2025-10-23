@@ -776,7 +776,7 @@ class BartModel(nn.Module, SupportsQuant):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        encoder_outputs: list[torch.Tensor] | None = None,
+        encoder_outputs: list[torch.Tensor],
     ) -> torch.Tensor:
         r"""
         Args:
@@ -793,15 +793,12 @@ class BartModel(nn.Module, SupportsQuant):
         Returns:
             Model output torch.Tensor
         """
-        if encoder_outputs is None:
-            encoder_outputs = []
-
         # decoder outputs consists of
         # (dec_features, past_key_value, dec_hidden, dec_attn)
         decoder_outputs = self.decoder(
             decoder_input_ids=input_ids,
             decoder_positions=positions,
-            encoder_hidden_states=encoder_outputs,
+            encoder_outputs=encoder_outputs,
         )
 
         return decoder_outputs
@@ -876,6 +873,12 @@ class BartDummyInputsBuilder(BaseDummyInputsBuilder[BartProcessingInfo]):
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
+        logger.info(
+            "BART DEBUG -- seq_len: %s, mm_counts: %s, mm_options: %s",
+            seq_len,
+            mm_counts,
+            mm_options,
+        )
         # Return dummy encoder text for profiling
         num_texts = mm_counts.get("text", 0)
         if num_texts == 0:
@@ -895,14 +898,7 @@ class BartMultiModalProcessor(EncDecMultiModalProcessor[BartProcessingInfo]):
         prompt: str | list[int],
         mm_data: MultiModalDataDict,
     ) -> str | list[int]:
-        # This is called from input preprocessor with encoder-decoder prompts
-        # already split out
-        tokenizer = self.info.get_tokenizer()
-        return tokenizer(
-            prompt,
-            add_special_tokens=False,
-            return_tensors="pt",
-        )
+        return [0]
 
     def create_decoder_prompt(
         self,
@@ -929,7 +925,10 @@ class BartMultiModalProcessor(EncDecMultiModalProcessor[BartProcessingInfo]):
 
         # For BART encoder-decoder: check if we have encoder text data
         has_encoder_data = mm_data and "texts" in mm_data
-        logger.info("mm_data: %s", mm_data)
+        logger.info("BART DEBUG - mm_data: %s", mm_data)
+        logger.info("BART DEBUG - mm_kwargs: %s", mm_kwargs)
+        logger.info("BART DEBUG - tok_kwargs: %s", tok_kwargs)
+        logger.info("BART DEBUG - prompt %s", prompt)
 
         result = {}
 
@@ -1098,7 +1097,7 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
+        encoder_outputs: list[torch.Tensor] | None = None,
         **kwargs,
     ) -> torch.Tensor:
         r"""
@@ -1115,28 +1114,10 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
         Returns:
             Output torch.Tensor
         """
-        encoder_input = self._parse_and_validate_encoder_input(**kwargs)
-        encoder_input_ids = encoder_input["encoder_input_ids"]
+        if encoder_outputs is None:
+            encoder_outputs = []
 
-        # Create encoder positions if we have encoder input
-        if encoder_input_ids is not None:
-            # Squeeze all dimensions of size 1 to get 1D tensor
-            encoder_input_ids = encoder_input_ids.squeeze()
-            encoder_positions = torch.arange(
-                encoder_input_ids.size(0),
-                dtype=torch.long,
-                device=encoder_input_ids.device,
-            )
-        else:
-            # Create empty tensors if no encoder input
-            encoder_positions = torch.tensor(
-                [], dtype=torch.long, device=input_ids.device
-            )
-            encoder_input_ids = torch.tensor(
-                [], dtype=torch.long, device=input_ids.device
-            )
-
-        return self.model(input_ids, positions, encoder_input_ids, encoder_positions)
+        return self.model(input_ids, positions, encoder_outputs)
 
     def compute_logits(
         self,
