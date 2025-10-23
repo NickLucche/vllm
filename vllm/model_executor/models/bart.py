@@ -30,6 +30,7 @@ from transformers.utils import logging
 
 from vllm.attention import Attention, AttentionType
 from vllm.attention.layer import MultiHeadAttention
+from vllm.attention.layers.cross_attention import CrossAttention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -358,7 +359,7 @@ class BartCrossAttention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_world_size % self.total_num_kv_heads == 0
         self.num_kv_heads = self.num_heads  # No GQA in bart
-        self.attn = Attention(
+        self.attn = CrossAttention(
             self.num_heads,
             self.head_dim,
             self.scaling,
