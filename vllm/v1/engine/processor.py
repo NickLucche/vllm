@@ -15,16 +15,21 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
-from vllm.multimodal.inputs import (MultiModalFeatureSpec, MultiModalFieldElem,
-                                    MultiModalKwargsItem,
-                                    MultiModalSharedField, MultiModalUUIDDict,
-                                    PlaceholderRange)
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    MultiModalSharedField,
+    MultiModalUUIDDict,
+    PlaceholderRange,
+)
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import length_from_prompt_token_ids_or_embeds, sha256
+from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.hashing import sha256
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import MultiModalCacheStats
 from vllm.v1.structured_output.backend_guidance import validate_guidance_grammar
@@ -429,8 +434,7 @@ class Processor:
             if decoder_inputs["type"] == "embeds"
             else None
         )
-        encoder_token_ids = (encoder_inputs["prompt_token_ids"]
-                             if encoder_inputs else [])
+        encoder_token_ids = encoder_inputs["prompt_token_ids"] if encoder_inputs else []
 
         sampling_params = None
         pooling_params = None
@@ -496,7 +500,10 @@ class Processor:
                     modality="text",
                     identifier=sha256(encoder_token_ids).hex(),
                     mm_position=PlaceholderRange(
-                        offset=0, length=len(encoder_token_ids))))
+                        offset=0, length=len(encoder_token_ids)
+                    ),
+                )
+            )
 
         return EngineCoreRequest(
             request_id=request_id,

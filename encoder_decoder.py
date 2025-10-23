@@ -10,7 +10,7 @@ NOTE: This example is not yet supported in V1.
 """
 
 import argparse
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 from vllm import LLM, SamplingParams
 from vllm.inputs import (
@@ -30,7 +30,7 @@ class ModelRequestData(NamedTuple):
     model_id: str
     encoder_prompts: list
     decoder_prompts: list
-    hf_overrides: Optional[dict] = None
+    hf_overrides: dict | None = None
 
 
 def get_bart_config() -> ModelRequestData:

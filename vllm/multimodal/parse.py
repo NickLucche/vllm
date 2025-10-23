@@ -275,7 +275,7 @@ class TextProcessorItems(ProcessorBatchItems[str]):
     Data items for text modality (used for encoder-decoder models like BART).
     """
 
-    def __init__(self, data: Optional[Union[str, Sequence[str]]]) -> None:
+    def __init__(self, data) -> None:
         if data is None:
             data = [""]
         elif isinstance(data, str):
@@ -532,7 +532,7 @@ class MultiModalDataParser:
     def _parse_text_data(
         self,
         data: ModalityData[str],
-    ) -> Optional[ModalityDataItems[Any, Any]]:
+    ) -> ModalityDataItems[Any, Any] | None:
         """Parse text data for encoder-decoder models like BART."""
         if data is None:
             return TextProcessorItems(None)
