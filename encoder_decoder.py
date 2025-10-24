@@ -80,6 +80,21 @@ MODEL_GETTERS = {
 }
 
 
+def create_single_prompt() -> list:
+    encoder_prompt = TextPrompt(
+        prompt="Scientists at the university unveiled "
+        "a new type of battery. They claim it can "
+        "charge a smartphone in under five minutes "
+        "and lasts for three full days on a single charge."
+    )
+    decoder_prompt = TextPrompt(prompt="Scientists have developed")
+    return [
+        ExplicitEncoderDecoderPrompt(
+            encoder_prompt=encoder_prompt, decoder_prompt=decoder_prompt
+        )
+    ]
+
+
 def create_all_prompt_types(
     encoder_prompts_raw: list,
     decoder_prompts_raw: list,
@@ -176,12 +191,13 @@ def main(args):
         dtype="float16",
         hf_overrides=model_config.hf_overrides,
     )
-    tokenizer = llm.llm_engine.get_tokenizer()
-    prompts = create_all_prompt_types(
-        encoder_prompts_raw=model_config.encoder_prompts,
-        decoder_prompts_raw=model_config.decoder_prompts,
-        tokenizer=tokenizer,
-    )
+    # tokenizer = llm.llm_engine.get_tokenizer()
+    # prompts = create_all_prompt_types(
+    #    encoder_prompts_raw=model_config.encoder_prompts,
+    #    decoder_prompts_raw=model_config.decoder_prompts,
+    #    tokenizer=tokenizer,
+    # )
+    prompts = create_single_prompt()
     sampling_params = create_sampling_params()
     outputs = llm.generate(prompts, sampling_params)
     print_outputs(outputs)
