@@ -1048,12 +1048,18 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
     def get_multimodal_embeddings(self, **kwargs) -> MultiModalEmbeddings:
         # Required as part of SupportsMultiModal interface.
         # For BART, we parse the encoder_input_ids and return encoder outputs
+        logger.info("BART DEBUG -- kwargs: %s", kwargs)
         encoder_input = self._parse_and_validate_encoder_input(**kwargs)
+        logger.info("BART DEBUG -- encoder_input: %s", encoder_input)
         encoder_input_ids = encoder_input["encoder_input_ids"]
 
-        # Squeeze all dimensions of size 1 to get 1D tensor
-        # encoder_input_ids comes in as [1, 1, seq_len] and needs to be [seq_len]
-        encoder_input_ids = encoder_input_ids.squeeze()
+        if encoder_input_ids is None:
+            raise ValueError(
+                "encoder_input_ids is None - this should not happen. "
+                "Check that multimodal data is being passed correctly."
+            )
+
+        encoder_input_ids = encoder_input_ids.flatten()
 
         # Create positions for encoder input (1D tensor)
         encoder_positions = torch.arange(
@@ -1072,7 +1078,9 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
     def _parse_and_validate_encoder_input(
         self, **kwargs: object
     ) -> dict[str, torch.Tensor]:
-        encoder_input_ids = kwargs.get("encoder_input_ids")
+        # TODO input_ids vs encoder_input_ids is different between
+        # the profiling code path and normal execution path
+        encoder_input_ids = kwargs.get("encoder_input_ids", kwargs.get("input_ids"))
 
         if encoder_input_ids is not None:
             if not isinstance(encoder_input_ids, (torch.Tensor, list)):
@@ -1083,6 +1091,8 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
             # Concatenate all encoder inputs into a single tensor
             if isinstance(encoder_input_ids, list):
                 encoder_input_ids = torch.cat(encoder_input_ids)
+            elif encoder_input_ids.dim() == 0:
+                encoder_input_ids = encoder_input_ids.unsqueeze(0)
 
         return {"encoder_input_ids": encoder_input_ids}
 
@@ -1547,10 +1557,7 @@ class MBartMultiModalProcessor(EncDecMultiModalProcessor[MBartProcessingInfo]):
         prompt: str | list[int],
         mm_data: MultiModalDataDict,
     ) -> str | list[int]:
-        # For mBART, we create a dummy encoder prompt with a single placeholder token
-        # This will be replaced by the actual encoder tokens via prompt updates
-        # Similar to Whisper's approach
-        return [0]
+        return prompt
 
     def create_decoder_prompt(
         self,

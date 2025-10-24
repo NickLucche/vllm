@@ -165,7 +165,7 @@ def main(args):
     print(f"🚀 Running demo for model: {model_config.model_id}")
     llm = LLM(
         model=model_config.model_id,
-        dtype="float",
+        dtype="float16",
         hf_overrides=model_config.hf_overrides,
     )
     tokenizer = llm.llm_engine.get_tokenizer()

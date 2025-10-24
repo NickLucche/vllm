@@ -1656,6 +1656,9 @@ class LLM:
     ) -> None:
         prompt_text, _, _ = get_prompt_components(prompt)
         request_id = str(next(self.request_counter))
+        logger.info(
+            "BART DEBUG -- LLM _add_request prompt: %s -- %s", type(prompt), prompt
+        )
 
         engine_request, tokenization_kwargs = self._process_inputs(
             request_id,

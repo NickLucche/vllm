@@ -1778,6 +1778,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # 2. A list or tuple (length: num_items) of tensors,
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
+                logger.info(
+                    "BART DEBUG -- _execute_mm_encoder - mm_kwargs_group: %s",
+                    mm_kwargs_group,
+                )
                 curr_group_outputs = model.get_multimodal_embeddings(**mm_kwargs_group)
 
             sanity_check_mm_encoder_outputs(
