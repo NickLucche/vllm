@@ -626,6 +626,11 @@ class InputPreprocessor:
                 "BART DEBUG -- after _prompt_to_llm_inputs() encoder_inputs: %s",
                 encoder_inputs,
             )
+            # TODO _prompt_to_llm_inputs() puts the encoder input tokens in
+            # the prompt_token_ids field instead of encoder_prompt_token_ids.
+            encoder_inputs["encoder_prompt_token_ids"] = encoder_inputs[
+                "prompt_token_ids"
+            ]
             if (decoder_input := prompt_["decoder_prompt"]) is None:
                 decoder_inputs = None
             else:
