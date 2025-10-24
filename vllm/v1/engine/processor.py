@@ -403,8 +403,6 @@ class Processor:
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
         logger.info("BART DEBUG -- prompt: %s", prompt)
-        logger.info("BART DEBUG -- tokenization_kwargs: %s", tokenization_kwargs)
-        logger.info("BART DEBUG -- mm_uuids: %s", mm_uuids)
         processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
             prompt,
             tokenization_kwargs=tokenization_kwargs,

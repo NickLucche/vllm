@@ -1049,52 +1049,73 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
         # Required as part of SupportsMultiModal interface.
         # For BART, we parse the encoder_input_ids and return encoder outputs
         logger.info("BART DEBUG -- kwargs: %s", kwargs)
-        encoder_input = self._parse_and_validate_encoder_input(**kwargs)
-        logger.info("BART DEBUG -- encoder_input: %s", encoder_input)
-        encoder_input_ids = encoder_input["encoder_input_ids"]
+        encoder_input_ids_list = self._parse_and_validate_encoder_input(**kwargs)
+        logger.info("BART DEBUG -- encoder_input_ids_list: %s", encoder_input_ids_list)
 
-        if encoder_input_ids is None:
+        if not encoder_input_ids_list:
             raise ValueError(
-                "encoder_input_ids is None - this should not happen. "
+                "encoder_input_ids_list is empty - this should not happen. "
                 "Check that multimodal data is being passed correctly."
             )
 
-        encoder_input_ids = encoder_input_ids.flatten()
+        # Process each encoder input separately and return a list of outputs
+        encoder_outputs = []
+        for encoder_input_ids in encoder_input_ids_list:
+            # Flatten to 1D tensor if needed
+            if isinstance(encoder_input_ids, torch.Tensor):
+                encoder_input_ids = encoder_input_ids.flatten()
+            else:
+                encoder_input_ids = torch.tensor(
+                    encoder_input_ids, device=self.device
+                ).flatten()
 
-        # Create positions for encoder input (1D tensor)
-        encoder_positions = torch.arange(
-            encoder_input_ids.size(0),
-            dtype=torch.long,
-            device=encoder_input_ids.device,
-        )
+            # Create positions for encoder input (1D tensor)
+            encoder_positions = torch.arange(
+                encoder_input_ids.size(0),
+                dtype=torch.long,
+                device=encoder_input_ids.device,
+            )
 
-        return [
-            self.model.encoder(
+            # Run encoder and append output
+            encoder_output = self.model.encoder(
                 input_ids=encoder_input_ids,
                 positions=encoder_positions,
             )
-        ]
+            encoder_outputs.append(encoder_output)
 
-    def _parse_and_validate_encoder_input(
-        self, **kwargs: object
-    ) -> dict[str, torch.Tensor]:
+        return encoder_outputs
+
+    def _parse_and_validate_encoder_input(self, **kwargs: object) -> list[torch.Tensor]:
         # TODO input_ids vs encoder_input_ids is different between
         # the profiling code path and normal execution path
         encoder_input_ids = kwargs.get("encoder_input_ids", kwargs.get("input_ids"))
 
-        if encoder_input_ids is not None:
-            if not isinstance(encoder_input_ids, (torch.Tensor, list)):
-                raise ValueError(
-                    "Incorrect type of encoder input_ids. "
-                    f"Got type: {type(encoder_input_ids)}"
-                )
-            # Concatenate all encoder inputs into a single tensor
-            if isinstance(encoder_input_ids, list):
-                encoder_input_ids = torch.cat(encoder_input_ids)
-            elif encoder_input_ids.dim() == 0:
-                encoder_input_ids = encoder_input_ids.unsqueeze(0)
+        if encoder_input_ids is None:
+            return []
 
-        return {"encoder_input_ids": encoder_input_ids}
+        if not isinstance(encoder_input_ids, (torch.Tensor, list)):
+            raise ValueError(
+                "Incorrect type of encoder input_ids. "
+                f"Got type: {type(encoder_input_ids)}"
+            )
+
+        # Return as a list of tensors (one per item in the batch)
+        if isinstance(encoder_input_ids, list):
+            # Already a list - ensure each item is valid
+            result = []
+            for item in encoder_input_ids:
+                if isinstance(item, torch.Tensor):
+                    if item.dim() == 0:
+                        item = item.unsqueeze(0)
+                    result.append(item)
+                else:
+                    result.append(item)
+            return result
+        else:
+            # Single tensor - wrap in list
+            if encoder_input_ids.dim() == 0:
+                encoder_input_ids = encoder_input_ids.unsqueeze(0)
+            return [encoder_input_ids]
 
     def get_input_embeddings(
         self,

@@ -349,12 +349,22 @@ class InputPreprocessor:
 
         inputs: TokenInputs | MultiModalInputs
         if self.model_config.is_multimodal_model:
+            logger.info(
+                "BART DEBUG -- _process_tokens detected multimodal model "
+                "- prompt_token_ids: %s",
+                prompt_token_ids,
+            )
             inputs = self._process_multimodal(
                 prompt_token_ids,
                 parsed_content.get("multi_modal_data") or {},
                 parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
+            )
+            logger.info(
+                "BART DEBUG -- _process_tokens  after "
+                "_process_multimodal() multimodal inputs: %s",
+                inputs,
             )
         else:
             if parsed_content.get("multi_modal_data"):
@@ -419,6 +429,7 @@ class InputPreprocessor:
         * [`SingletonInputs`][vllm.inputs.data.SingletonInputs] instance
         """
         parsed = parse_singleton_prompt(prompt)
+        logger.info("BART DEBUG -- _prompt_to_llm_inputs parsed: %s", parsed)
 
         if parsed["type"] == "embeds":
             return self._process_embeds(parsed["content"])
@@ -496,6 +507,7 @@ class InputPreprocessor:
         For encoder/decoder models only:
         Separate Encoder/Decoder inputs from a MultiModalEncDecInputs
         """
+        logger.info("_split_enc_dec_mm_inputs inputs: %s", inputs)
         if (
             inputs["type"] == "embeds"
             or decoder_inputs_to_override
@@ -519,6 +531,7 @@ class InputPreprocessor:
         decoder_inputs: SingletonInputs
 
         if inputs["type"] == "multimodal":  # Multimodal data inputs
+            logger.info("BART DEBUG -- _split_enc_dec_mm_inputs multimodal inputs")
             if "encoder_prompt_token_ids" not in inputs:
                 raise RuntimeError(
                     "You should register an encoder-decoder "
@@ -541,6 +554,7 @@ class InputPreprocessor:
                 decoder_inputs["cache_salt"] = cache_salt
 
         elif inputs["type"] == "token":  # Text-only inputs
+            logger.info("BART DEBUG -- _split_enc_dec_mm_inputs text-only inputs")
             encoder_inputs = token_inputs(prompt_token_ids=[])
             decoder_inputs = decoder_inputs_to_override or inputs
         else:
@@ -588,16 +602,29 @@ class InputPreprocessor:
         * [`EncoderDecoderInputs`][vllm.inputs.data.EncoderDecoderInputs]
           instance
         """
+        logger.info(
+            "BART DEBUG -- _process_encoder_decoder_prompt prompt: %s -- %s",
+            type(prompt),
+            prompt,
+        )
         encoder_inputs: SingletonInputs
         decoder_inputs: SingletonInputs | None
 
         if is_explicit_encoder_decoder_prompt(prompt):
+            logger.info("BART DEBUG -- explicit encoder-decoder prompt detected")
             # `cast` is needed for mypy, but not pyright
             prompt_ = cast(ExplicitEncoderDecoderPrompt, prompt)
+            logger.info(
+                "BART DEBUG -- before _prompt_to_llm_inputs() prompt_: %s", prompt_
+            )
             encoder_inputs = self._prompt_to_llm_inputs(
                 prompt_["encoder_prompt"],
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
+            )
+            logger.info(
+                "BART DEBUG -- after _prompt_to_llm_inputs() encoder_inputs: %s",
+                encoder_inputs,
             )
             if (decoder_input := prompt_["decoder_prompt"]) is None:
                 decoder_inputs = None
@@ -606,10 +633,23 @@ class InputPreprocessor:
             # For multimodal model, override decoder prompt from processor
             # with explicit decoder prompt.
             if self.model_config.is_multimodal_model:
+                logger.info(
+                    "BART DEBUG -- BEFORE _split_enc_dec_mm_inputs "
+                    "encoder_inputs: %s -- decoder_inputs: %s",
+                    encoder_inputs,
+                    decoder_inputs,
+                )
                 encoder_inputs, decoder_inputs = self._split_enc_dec_mm_inputs(
                     encoder_inputs, decoder_inputs
                 )
+                logger.info(
+                    "BART DEBUG -- AFTER _split_enc_dec_mm_inputs "
+                    "encoder_inputs: %s -- decoder_inputs: %s",
+                    encoder_inputs,
+                    decoder_inputs,
+                )
         else:
+            logger.info("BART DEBUG -- singleton prompt detected")
             # `cast` is needed for mypy, but not pyright
             inputs = self._prompt_to_llm_inputs(
                 cast(SingletonPrompt, prompt),
@@ -702,11 +742,15 @@ class InputPreprocessor:
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> ProcessorInputs:
         """Preprocess the input prompt."""
+        logger.info(
+            "BART DEBUG -- before _preprocess prompt: %s -- %s", type(prompt), prompt
+        )
         res = self._preprocess(
             prompt,
             tokenization_kwargs,
             mm_uuids=mm_uuids,
         )
+        logger.info("BART DEBUG -- after _preprocess res: %s -- %s", type(res), res)
 
         if self.mm_processor_cache and self.mm_cache_stats is not None:
             delta = self.mm_processor_cache.make_stats(delta=True)
