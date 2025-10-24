@@ -98,6 +98,14 @@ def create_all_prompt_types(
         )
     )
 
+    # TODO Re-enable the full list. start with 1 for simpler testing
+    return [
+        ExplicitEncoderDecoderPrompt(
+            encoder_prompt=tokens_prompt,
+            decoder_prompt=text_prompt,
+        ),
+    ]
+
     decoder_tokens_prompt = TokensPrompt(
         prompt_token_ids=tokenizer.encode(decoder_prompts_raw[0])
     )
