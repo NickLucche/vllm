@@ -1327,7 +1327,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_common_prefix_blocks = scheduler_output.num_common_prefix_blocks[
                     kv_cache_group_id
                 ]
-
+            # breakpoint()
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc,
                 query_start_loc_cpu=query_start_loc_cpu,
@@ -1788,6 +1788,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 curr_group_outputs,
                 expected_num_items=num_items,
             )
+            print("GPU RUNNER ENCODER OUTPUTS:", [co.shape for co in curr_group_outputs], "\n")
             encoder_outputs.extend(curr_group_outputs)
 
         # Cache the encoder outputs by mm_hash
@@ -1817,13 +1818,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             mm_embeds_req: list[torch.Tensor] = []
 
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            print("Gather mm embeds, num_scheduled_tokens:", num_scheduled_tokens, "\n")
             req_state = self.requests[req_id]
             num_computed_tokens = req_state.num_computed_tokens + shift_computed_tokens
 
             for mm_feature in req_state.mm_features:
                 pos_info = mm_feature.mm_position
                 start_pos = pos_info.offset
-                num_encoder_tokens = pos_info.length
+                num_encoder_tokens = pos_info.length # 7 correct
 
                 # The encoder output is needed if the two ranges overlap:
                 # [num_computed_tokens,
@@ -1846,6 +1848,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 mm_hash = mm_feature.identifier
                 encoder_output = self.encoder_cache.get(mm_hash, None)
+                print("gather_mm_embeddings encoder_output:", encoder_output.shape, "\n")
+                print("gather_mm_embeddings start/end", start_idx, end_idx, "\n")
                 assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
 
                 if (is_embed := pos_info.is_embed) is not None:
@@ -1856,10 +1860,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     True if is_embed is None else is_embed
                 )
 
+                # breakpoint()
                 mm_embeds_item = gather_mm_placeholders(
                     encoder_output[start_idx:end_idx],
                     is_embed=is_embed,
                 )
+                print("gather_mm_embeddings mm_embeds_item:", is_embed, mm_embeds_item.shape, "\n")
                 mm_embeds_req.append(mm_embeds_item)
 
             if self.is_multimodal_pruning_enabled and self.uses_mrope:
@@ -2104,11 +2110,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
+            # breakpoint()
             inputs_embeds_scheduled = self.model.get_input_embeddings(
                 self.input_ids.gpu[:num_scheduled_tokens],
                 multimodal_embeddings=mm_embeds,
                 is_multimodal=is_mm_embed,
             )
+            print("GET INPUT EMBEDS OUT", inputs_embeds_scheduled, "\n")
 
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(inputs_embeds_scheduled)
@@ -2166,6 +2174,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_input_tokens, intermediate_tensors, True
             )
 
+        # TODO try and get rid of this enc-dec specific logic 
         if (
             self.model_config.is_encoder_decoder
             and scheduler_output.scheduled_encoder_inputs
@@ -2177,6 +2186,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # ever have a single encoder input.
             encoder_outputs = self._execute_mm_encoder(scheduler_output)
             model_kwargs.update({"encoder_outputs": encoder_outputs})
+            # model_kwargs.update({"num_encoder_outputs": torch.count_nonzero(is_mm_embed).item()})
+            # mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output)
+
+            # inputs_embeds_scheduled = self.model.get_input_embeddings(
+            #     self.input_ids.gpu[:num_scheduled_tokens],
+            #     multimodal_embeddings=mm_embeds,
+            #     is_multimodal=is_mm_embed,
+            # )
+            # print("GET INPUT EMBEDS OUT", inputs_embeds_scheduled, "\n")
+
+            # # TODO(woosuk): Avoid the copy. Optimize.
+            # self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(inputs_embeds_scheduled)
+
+            # input_ids = None
+            # inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
 
         return (
             num_scheduled_tokens,
@@ -2459,6 +2483,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ) = self._preprocess(
                 scheduler_output, num_input_tokens, intermediate_tensors
             )
+            # breakpoint()
 
             uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
                 num_scheduled_tokens == self.input_batch.num_reqs * max_query_len
@@ -2499,6 +2524,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             record_function_or_nullcontext("Forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
+            print("INPUT EMBEDS:", inputs_embeds.shape if inputs_embeds is not None else "None", "\n")
+            print("INPUT IDS:", input_ids.shape if input_ids is not None else "None", "\n")
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -2639,7 +2666,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         with record_function_or_nullcontext("EPLB"):
             self.eplb_step()
-
+        print("Sampled token ids:", valid_sampled_token_ids, "\n")
         output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
@@ -3386,6 +3413,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Add encoder inputs for text-only encoder-decoder models
             if self.model_config.is_encoder_decoder and not self.supports_mm_inputs:
                 # TODO This is not the correct encoder input
+                # FIXME check whether we can get rid of this
                 model_kwargs.update(
                     {
                         "encoder_input_ids": self.input_ids.gpu[:num_tokens],

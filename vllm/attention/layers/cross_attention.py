@@ -92,6 +92,7 @@ def create_cross_attention_backend(
             common_attn_metadata: CommonAttentionMetadata,
             fast_build: bool = False,
         ) -> AttentionMetadata:
+            # TODO deepcopy? or just set causal to False?
             new_metadata = copy(common_attn_metadata)
             new_metadata.causal = False
             max_encoder_len = _get_max_encoder_len(self.vllm_config)

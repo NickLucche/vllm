@@ -434,6 +434,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             max_num_splits=max_num_splits,
             causal=causal,
         )
+        print("CREATING FA META with causal:", causal, "\n")
         return attn_metadata
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:

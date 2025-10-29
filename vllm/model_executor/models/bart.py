@@ -528,10 +528,11 @@ class BartDecoderLayer(nn.Module):
 
         # Self Attention
         hidden_states = self.self_attn(hidden_states=decoder_hidden_states)
+        print("BART DECODER SELF ATTN", hidden_states.mean(), hidden_states.std(), "\n")
 
         hidden_states = residual + hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
-
+        print("BART DECODER SELF ATTN LAYER NORM", hidden_states.mean(), hidden_states.std(), "\n")
         # Cross-Attention Block
 
         residual = hidden_states
@@ -540,6 +541,7 @@ class BartDecoderLayer(nn.Module):
             decoder_hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
         )
+        print("BART DECODER CROSS ATTN", hidden_states.mean(), hidden_states.std(), "\n")
 
         hidden_states = residual + hidden_states
         hidden_states = self.encoder_attn_layer_norm(hidden_states)
@@ -627,6 +629,7 @@ class BartEncoder(nn.Module):
             Decoder output torch.Tensor
         """
         # retrieve input_ids and inputs_embeds
+        print("BART ENCODER INPUT_IDS", input_ids, "\n")
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
@@ -638,7 +641,7 @@ class BartEncoder(nn.Module):
 
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states=hidden_states)
-
+        print("BART ENCODER LAST HIDDEN STATES", hidden_states.mean(), hidden_states.std(), "\n")
         return hidden_states
 
 
@@ -697,7 +700,7 @@ class BartDecoder(nn.Module):
         self,
         decoder_input_ids: torch.Tensor,
         decoder_positions: torch.Tensor,
-        encoder_outputs: list[torch.Tensor],
+        encoder_hidden_states: torch.Tensor | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r"""
@@ -708,20 +711,23 @@ class BartDecoder(nn.Module):
                 provide it.
             decoder_positions
                 Positions of *decoder* input sequence tokens.
+            inputs_embeds:
+                Tensor of decoder input embeddings
             encoder_hidden_states:
                 Tensor of encoder output embeddings
         Returns:
             Decoder output torch.Tensor
         """
-        assert len(encoder_outputs) in (0, 1)
-        encoder_hidden_states = (
-            encoder_outputs[0] if len(encoder_outputs) == 1 else None
-        )
-
+        # breakpoint()
+        print("BART DECODER INPUT_IDS", decoder_input_ids, "\n")
         if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(decoder_input_ids)
-        else:
-            decoder_positions = inputs_embeds[:, -1]
+            assert decoder_input_ids is not None
+            inputs_embeds = self.get_input_embeddings(decoder_input_ids)
+            print("BARD DECODED ENCODED input_ids", inputs_embeds.shape, "\n")
+        # else:
+        #     assert decoder_input_ids is None
+        #     # TODO review this
+        #     decoder_positions = inputs_embeds[:, -1]
 
         # embed positions
         embed_pos = self.embed_positions(decoder_positions)
@@ -731,14 +737,18 @@ class BartDecoder(nn.Module):
         hidden_states = self.layernorm_embedding(hidden_states)
 
         # decoder layers
-
+        # print("ENCODER HIDDEN STATES", encoder_hidden_states, "\n")
+        # print(" HIDDEN STATES", hidden_states, "\n")
         for decoder_layer in self.layers:
             hidden_states = decoder_layer(
                 decoder_hidden_states=hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
             )
-
+        print("BART DECODER LAST HIDDEN STATES", hidden_states.mean(), hidden_states.std(), "\n")
         return hidden_states
+    
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
 
 
 class BartModel(nn.Module, SupportsQuant):
@@ -774,8 +784,9 @@ class BartModel(nn.Module, SupportsQuant):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
+        inputs_embeds: torch.Tensor | None,
         encoder_outputs: list[torch.Tensor],
     ) -> torch.Tensor:
         r"""
@@ -798,7 +809,8 @@ class BartModel(nn.Module, SupportsQuant):
         decoder_outputs = self.decoder(
             decoder_input_ids=input_ids,
             decoder_positions=positions,
-            encoder_outputs=encoder_outputs,
+            inputs_embeds=inputs_embeds,
+            encoder_hidden_states=encoder_outputs,
         )
 
         return decoder_outputs
@@ -873,12 +885,12 @@ class BartDummyInputsBuilder(BaseDummyInputsBuilder[BartProcessingInfo]):
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
-        logger.info(
-            "BART DEBUG -- seq_len: %s, mm_counts: %s, mm_options: %s",
-            seq_len,
-            mm_counts,
-            mm_options,
-        )
+        # logger.info(
+        #     "BART DEBUG -- seq_len: %s, mm_counts: %s, mm_options: %s",
+        #     seq_len,
+        #     mm_counts,
+        #     mm_options,
+        # )
         # Return dummy encoder text for profiling
         num_texts = mm_counts.get("text", 0)
         if num_texts == 0:
@@ -925,10 +937,10 @@ class BartMultiModalProcessor(EncDecMultiModalProcessor[BartProcessingInfo]):
 
         # For BART encoder-decoder: check if we have encoder text data
         has_encoder_data = mm_data and "texts" in mm_data
-        logger.info("BART DEBUG - mm_data: %s", mm_data)
-        logger.info("BART DEBUG - mm_kwargs: %s", mm_kwargs)
-        logger.info("BART DEBUG - tok_kwargs: %s", tok_kwargs)
-        logger.info("BART DEBUG - prompt %s", prompt)
+        # logger.info("BART DEBUG - mm_data: %s", mm_data)
+        # logger.info("BART DEBUG - mm_kwargs: %s", mm_kwargs)
+        # logger.info("BART DEBUG - tok_kwargs: %s", tok_kwargs)
+        # logger.info("BART DEBUG - prompt %s", prompt)
 
         result = {}
 
@@ -1046,12 +1058,14 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
         return self.model.decoder
 
     def get_multimodal_embeddings(self, **kwargs) -> MultiModalEmbeddings:
+        # breakpoint()
         # Required as part of SupportsMultiModal interface.
         # For BART, we parse the encoder_input_ids and return encoder outputs
-        logger.info("BART DEBUG -- kwargs: %s", kwargs)
+        logger.info("BART DEBUG -- get_mm kwargs: %s", kwargs)
         encoder_input_ids_list = self._parse_and_validate_encoder_input(**kwargs)
-        logger.info("BART DEBUG -- encoder_input_ids_list: %s", encoder_input_ids_list)
+        logger.info("BART DEBUG -- get_mm encoder_input_ids_list: %s", [e.shape for e in encoder_input_ids_list])
 
+        print("BART ENCODER OUTPUT", encoder_input_ids_list, "\n")
         if not encoder_input_ids_list:
             raise ValueError(
                 "encoder_input_ids_list is empty - this should not happen. "
@@ -1059,6 +1073,7 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
             )
 
         # Process each encoder input separately and return a list of outputs
+        # FIXME why the loop here?
         encoder_outputs = []
         for encoder_input_ids in encoder_input_ids_list:
             # Flatten to 1D tensor if needed
@@ -1081,6 +1096,8 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
                 input_ids=encoder_input_ids,
                 positions=encoder_positions,
             )
+            print("Encoder output shape:", encoder_output.shape, "\n")
+            print("Encoder output:", encoder_output.mean(), encoder_output.std(), "\n")
             encoder_outputs.append(encoder_output)
 
         return encoder_outputs
@@ -1117,18 +1134,25 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
                 encoder_input_ids = encoder_input_ids.unsqueeze(0)
             return [encoder_input_ids]
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: NestedTensors | None = None,
-    ) -> torch.Tensor:
-        raise NotImplementedError()
+    # def get_input_embeddings(
+    #     self,
+    #     input_ids: torch.Tensor,
+    #     multimodal_embeddings: MultiModalEmbeddings | None= None,
+    #     *,
+    #     is_multimodal: torch.Tensor | None = None,
+    #     handle_oov_mm_token: bool = False,
+    # ) -> torch.Tensor:        
+    #     logger.info("BART DEBUG -- get_input_embeddings called with input_ids: %s\nmm_embeds %s\n is_multimodal %s\n handle_oov_mm_token %s", input_ids, multimodal_embeddings, is_multimodal, handle_oov_mm_token)
+    #     return super().get_input_embeddings(input_ids, multimodal_embeddings, is_multimodal, handle_oov_mm_token)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        encoder_outputs: list[torch.Tensor] | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        encoder_outputs: torch.Tensor | None = None,
+        # num_encoder_outputs: int | None = None,
         **kwargs,
     ) -> torch.Tensor:
         r"""
@@ -1145,10 +1169,24 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
         Returns:
             Output torch.Tensor
         """
-        if encoder_outputs is None:
-            encoder_outputs = []
-
-        return self.model(input_ids, positions, encoder_outputs)
+        if encoder_outputs is not None:
+            # Assume same shape for all encoder outputs
+            encoder_outputs = torch.cat(encoder_outputs, dim=0)
+            print("BART FORWARD CALLED WITH encoder_outputs:", encoder_outputs.shape, "\n")
+        else:
+            print("BART FORWARD CALLED WITH encoder_outputs: None", "\n")
+        # if num_encoder_outputs is None:
+        #     encoder_outputs = None
+        # else:
+        #     # TODO does this affect cuda graphs buffers?
+        #     encoder_outputs, inputs_embeds = inputs_embeds[:num_encoder_outputs], inputs_embeds[num_encoder_outputs:]
+        #     # print("BART FORWARD CALLED WITH encoder_outputs:", encoder_outputs.shape, "\n")
+        #     # print("BART FORWARD CALLED WITH inputs_embeds:", inputs_embeds.shape, "\n")
+        #     # TODO is it really better with splitting? Basically we're moving enc-dec specific logic (the diff with MM)
+        #     # from vllm to model def..I guess this isn't too bad for OOT model  
+        #     positions = positions[num_encoder_outputs:]
+        print("BART FWD INPUT IDS", input_ids)
+        return self.model(input_ids, positions, inputs_embeds, encoder_outputs=encoder_outputs)
 
     def compute_logits(
         self,
@@ -1198,595 +1236,595 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
         return loaded_params
 
 
-class MBartEncoderLayer(BartEncoderLayer):
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        r"""
-        Args:
-            hidden_states
-                torch.Tensor of *encoder* input embeddings.
-        Returns:
-            Encoder layer output torch.Tensor
-        """
-        residual = hidden_states
-        hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states = self.self_attn(hidden_states=hidden_states)
-
-        hidden_states = residual + hidden_states
-
-        residual = hidden_states
-        hidden_states = self.final_layer_norm(hidden_states)
-        fc1_out, _ = self.fc1(hidden_states)
-        hidden_states = self.activation_fn(fc1_out)
-
-        hidden_states, _ = self.fc2(hidden_states)
-
-        hidden_states = residual + hidden_states
-
-        if hidden_states.dtype == torch.float16 and (
-            torch.isinf(hidden_states).any() or torch.isnan(hidden_states).any()
-        ):
-            hidden_states = cast_overflow_tensors(hidden_states)
-
-        return hidden_states
-
-
-class MBartDecoderLayer(BartDecoderLayer):
-    def forward(
-        self,
-        decoder_hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        residual = decoder_hidden_states
-        hidden_states = self.self_attn_layer_norm(decoder_hidden_states)
-
-        # Self Attention
-        hidden_states = self.self_attn(hidden_states=hidden_states)
-
-        hidden_states = residual + hidden_states
-
-        # Cross-Attention Block
-
-        residual = hidden_states
-        hidden_states = self.encoder_attn_layer_norm(hidden_states)
-
-        hidden_states = self.encoder_attn(
-            decoder_hidden_states=hidden_states,
-            encoder_hidden_states=encoder_hidden_states,
-        )
-
-        hidden_states = residual + hidden_states
-
-        # Fully Connected
-        residual = hidden_states
-        hidden_states = self.final_layer_norm(hidden_states)
-        fc1_out, _ = self.fc1(hidden_states)
-        hidden_states = self.activation_fn(fc1_out)
-
-        hidden_states, _ = self.fc2(hidden_states)
-
-        hidden_states = residual + hidden_states
-
-        return hidden_states
-
-
-class MBartEncoder(nn.Module):
-    """
-    Transformer encoder consisting of *config.encoder_layers*
-    self attention layers. Each layer is a [`BartEncoderLayer`].
-    Args:
-        config: BartConfig
-        embed_tokens (nn.Embedding): output embedding
-    """
-
-    def __init__(
-        self,
-        config: BartConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        lora_config: LoRAConfig | None = None,
-        embed_tokens: nn.Embedding | None = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-
-        self.cache_config = cache_config
-        self.quant_config = quant_config
-        self.lora_config = lora_config
-        embed_dim = config.d_model
-        self.max_source_positions = config.max_position_embeddings
-        embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
-
-        self.embed_tokens = BartScaledWordEmbedding(
-            config.vocab_size, embed_dim, embed_scale=embed_scale
-        )
-
-        if embed_tokens is not None:
-            self.embed_tokens.weight = embed_tokens.weight
-
-        self.embed_positions = BartLearnedPositionalEmbedding(
-            config.max_position_embeddings,
-            embed_dim,
-        )
-        self.layers = nn.ModuleList(
-            [
-                MBartEncoderLayer(
-                    config,
-                    cache_config,
-                    quant_config,
-                    prefix=f"{prefix}.layers.{layer_idx}",
-                )
-                for layer_idx in range(config.encoder_layers)
-            ]
-        )
-
-        self.layernorm_embedding = nn.LayerNorm(embed_dim)
-        self.layer_norm = nn.LayerNorm(config.d_model)  # 改动
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        r"""
-        Args:
-            input_ids
-                Indices of *encoder* input sequence tokens in the vocabulary.
-                Padding will be ignored by default should you
-                provide it.
-            positions
-                Positions of *encoder* input sequence tokens.
-        Returns:
-            Decoder output torch.Tensor
-        """
-        # retrieve input_ids and inputs_embeds
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
-
-        embed_pos = self.embed_positions(positions)
-        embed_pos = embed_pos.to(inputs_embeds.device)
-
-        hidden_states = inputs_embeds + embed_pos
-        hidden_states = self.layernorm_embedding(hidden_states)
-
-        for encoder_layer in self.layers:
-            hidden_states = encoder_layer(hidden_states=hidden_states)
-
-        hidden_states = self.layer_norm(hidden_states)
-        return hidden_states
-
-
-class MBartDecoder(nn.Module):
-    """
-    Transformer decoder consisting of *config.decoder_layers* layers.
-    Each layer is a [`BartDecoderLayer`]
-    Args:
-        config: BartConfig
-        embed_tokens (nn.Embedding): output embedding
-    """
-
-    def __init__(
-        self,
-        config: BartConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        lora_config: LoRAConfig | None = None,
-        embed_tokens: nn.Embedding | None = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.cache_config = cache_config
-        self.quant_config = quant_config
-        self.lora_config = lora_config
-        self.max_target_positions = config.max_position_embeddings
-        embed_scale = math.sqrt(config.d_model) if config.scale_embedding else 1.0
-
-        self.embed_tokens = BartScaledWordEmbedding(
-            config.vocab_size, config.d_model, embed_scale=embed_scale
-        )
-
-        if embed_tokens is not None:
-            self.embed_tokens.weight = embed_tokens.weight
-
-        self.embed_positions = BartLearnedPositionalEmbedding(
-            config.max_position_embeddings,
-            config.d_model,
-        )
-
-        self.layers = nn.ModuleList(
-            [
-                MBartDecoderLayer(
-                    config,
-                    cache_config,
-                    quant_config,
-                    prefix=f"{prefix}.layers.{layer_idx}",
-                )
-                for layer_idx in range(config.decoder_layers)
-            ]
-        )
-
-        self.layernorm_embedding = nn.LayerNorm(config.d_model)
-        self.layer_norm = nn.LayerNorm(config.d_model)
-
-    def forward(
-        self,
-        decoder_input_ids: torch.Tensor,
-        decoder_positions: torch.Tensor,
-        encoder_hidden_states: torch.Tensor | None,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        r"""
-        Args:
-            decoder_input_ids
-                Indices of *decoder* input sequence tokens in the vocabulary.
-                Padding will be ignored by default should you
-                provide it.
-            decoder_positions
-                Positions of *decoder* input sequence tokens.
-            encoder_hidden_states:
-                Tensor of encoder output embeddings
-        Returns:
-            Decoder output torch.Tensor
-        """
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(decoder_input_ids)
-        else:
-            decoder_positions = inputs_embeds[:, -1]
-
-        # embed positions
-        embed_pos = self.embed_positions(decoder_positions)
-        embed_pos = embed_pos.to(inputs_embeds.device)
-
-        hidden_states = inputs_embeds + embed_pos
-        hidden_states = self.layernorm_embedding(hidden_states)
-
-        # decoder layers
-
-        for decoder_layer in self.layers:
-            hidden_states = decoder_layer(
-                decoder_hidden_states=hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
-            )
-
-        hidden_states = self.layer_norm(hidden_states)
-        return hidden_states
-
-
-class MBartModel(nn.Module, SupportsQuant):
-    _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-
-        config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-
-        self.config = config
-
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
-
-        self.encoder = MBartEncoder(
-            config, cache_config, quant_config=quant_config, prefix=f"{prefix}.encoder"
-        )
-        self.decoder = MBartDecoder(
-            config, cache_config, quant_config=quant_config, prefix=f"{prefix}.decoder"
-        )
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        encoder_input_ids: torch.Tensor,
-        encoder_positions: torch.Tensor,
-    ) -> torch.Tensor:
-        r"""
-        Args:
-            input_ids
-                Indices of *decoder* input sequence tokens in the vocabulary.
-                Padding will be ignored by default should you
-                provide it.
-            positions
-                Positions of *decoder* input sequence tokens.
-            encoder_input_ids
-                Indices of *encoder* input sequence tokens in the vocabulary.
-            encoder_positions:
-                Positions of *encoder* input sequence tokens.
-        Returns:
-            Model output torch.Tensor
-        """
-
-        encoder_hidden_states = None
-
-        if encoder_input_ids.numel() > 0:
-            # Run encoder attention if a non-zero number of encoder tokens
-            # are provided as input
-            encoder_hidden_states = self.encoder(
-                input_ids=encoder_input_ids, positions=encoder_positions
-            )
-
-        # decoder outputs consists of
-        # (dec_features, past_key_value, dec_hidden, dec_attn)
-        decoder_outputs = self.decoder(
-            decoder_input_ids=input_ids,
-            decoder_positions=positions,
-            encoder_hidden_states=encoder_hidden_states,
-        )
-
-        return decoder_outputs
-
-
-class MBartProcessingInfo(BaseProcessingInfo):
-    """Processing information for mBART encoder-decoder models."""
-
-    def get_hf_config(self) -> BartConfig:
-        return self.ctx.get_hf_config(BartConfig)
-
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        # mBART's encoder input is treated as a "text" modality
-        # Like BART, mBART just has text for both encoder and decoder
-        return {"text": 1}
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int] | None:
-        # For mBART, the encoder can handle up to max_position_embeddings tokens
-        # Return this directly to avoid complex profiling
-        config = self.get_hf_config()
-        return {"text": config.max_position_embeddings}
-
-
-class MBartDummyInputsBuilder(BaseDummyInputsBuilder[MBartProcessingInfo]):
-    """Builds dummy inputs for profiling mBART models."""
-
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        # For mBART, the decoder prompt is separate from encoder
-        # Return minimal dummy text for decoder
-        return ""
-
-    def get_dummy_mm_data(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-    ) -> MultiModalDataDict:
-        # Return dummy encoder text for profiling
-        num_texts = mm_counts.get("text", 0)
-        if num_texts == 0:
-            return {}
-
-        # Create dummy encoder text of appropriate length
-        # Use simple repeated words for profiling
-        dummy_text = " ".join(["word"] * seq_len)
-        return {"text": dummy_text}
-
-
-class MBartMultiModalProcessor(EncDecMultiModalProcessor[MBartProcessingInfo]):
-    """Multimodal processor for mBART encoder-decoder models."""
-
-    def create_encoder_prompt(
-        self,
-        prompt: str | list[int],
-        mm_data: MultiModalDataDict,
-    ) -> str | list[int]:
-        return prompt
-
-    def create_decoder_prompt(
-        self,
-        prompt: str | list[int],
-        mm_data: MultiModalDataDict,
-    ) -> str | list[int]:
-        # The decoder prompt is the original prompt
-        return prompt
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ):
-        """
-        mBART doesn't have a HuggingFace Processor - it only has a tokenizer.
-        We tokenize the text directly using the tokenizer.
-        """
-        from transformers.feature_extraction_utils import BatchFeature
-
-        tokenizer = self.info.get_tokenizer()
-
-        # Tokenize the prompt text
-        tokenized = tokenizer(
-            prompt,
-            add_special_tokens=False,
-            return_tensors="pt",  # Return PyTorch tensors
-            **tok_kwargs,
-        )
-
-        return BatchFeature(tokenized)
-
-    def _get_mm_fields_config(
-        self,
-        hf_inputs,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        # For mBART, input_ids from tokenization are the encoder input
-        # We don't have separate multimodal features, just return empty
-        # The input_ids will be used as encoder input automatically
-        return {}
-
-    def _get_prompt_updates(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargsItems,
-    ) -> Sequence[PromptUpdate]:
-        from vllm.multimodal.processing import PromptReplacement
-
-        # Get the number of text items to determine token count
-        # For mBART, we need to replace the placeholder [0] with the actual
-        # number of encoder tokens from the text
-        num_text_items = mm_items.get_count("text", strict=False)
-
-        if num_text_items == 0:
-            return []
-
-        # Get the tokenized length - we'll use the input_ids from out_mm_kwargs
-        # to determine how many tokens the text actually has
-        text_items = mm_items.get_items("text", TextProcessorItems)
-        tokenizer = self.info.get_tokenizer()
-
-        # Tokenize the first text item to get the number of tokens
-        text = text_items.get(0)
-        num_tokens = len(tokenizer.encode(text, add_special_tokens=False))
-
-        return [
-            PromptReplacement(
-                modality="text",
-                target=[0],
-                replacement=[0] * num_tokens,
-            )
-        ]
-
-
-@MULTIMODAL_REGISTRY.register_processor(
-    MBartMultiModalProcessor,
-    info=MBartProcessingInfo,
-    dummy_inputs=MBartDummyInputsBuilder,
-)
-class MBartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal):
-    base_model_prefix = "model"
-
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            "decoder.": "model.decoder.",
-            "encoder.": "model.encoder.",
-            "shared.": "model.shared.",
-        },
-        orig_to_new_substr={
-            "beta": "bias",
-            "gamma": "weight",
-            "LayerNorm": "layernorm",
-        },
-    )
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        lora_config = vllm_config.lora_config
-        assert config.tie_word_embeddings
-        self.config = config
-        self.model = MBartModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
-
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-
-        embed_scale = math.sqrt(config.d_model) if config.scale_embedding else 1.0
-
-        self.lm_head = BartParallelLMHead(
-            config.vocab_size, config.d_model, embed_scale=embed_scale
-        )
-
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
-        )
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        *,
-        encoder_input_ids: torch.Tensor,
-        encoder_positions: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
-        return self.model(input_ids, positions, encoder_input_ids, encoder_positions)
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states)
-        return logits
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        model_params_dict = dict(self.named_parameters())
-        loaded_params = set()
-        remaining_weights = []
-        shared_embedding_weight = None
-
-        for name, loaded_weight in weights:
-            if any(skip in name for skip in ["cls.", "pooler.", "final_logits_bias"]):
-                continue
-            if any(
-                embed_name in name
-                for embed_name in [
-                    "shared.weight",
-                    "encoder.embed_tokens.weight",
-                    "decoder.embed_tokens.weight",
-                ]
-            ):
-                if shared_embedding_weight is None:
-                    shared_embedding_weight = loaded_weight
-                continue
-            is_stacked = False
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                vllm_name = name
-                for src, dst in self.hf_to_vllm_mapper.orig_to_new_substr.items():
-                    vllm_name = vllm_name.replace(src, dst)
-                for src, dst in self.hf_to_vllm_mapper.orig_to_new_prefix.items():
-                    if vllm_name.startswith(src):
-                        vllm_name = dst + vllm_name[len(src) :]
-                        break
-                vllm_name = vllm_name.replace(weight_name, param_name)
-                if vllm_name in model_params_dict:
-                    param = model_params_dict[vllm_name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight, shard_id)
-                    loaded_params.add(vllm_name)
-                is_stacked = True
-                break
-            if not is_stacked:
-                remaining_weights.append((name, loaded_weight))
-        loader = AutoWeightsLoader(self, skip_prefixes=["cls.", "pooler."])
-        auto_loaded_params = loader.load_weights(
-            remaining_weights, mapper=self.hf_to_vllm_mapper
-        )
-        loaded_params.update(auto_loaded_params)
-        if shared_embedding_weight is not None:
-            lm_head_param = self.lm_head.weight
-            weight_loader = getattr(
-                lm_head_param, "weight_loader", default_weight_loader
-            )
-            weight_loader(lm_head_param, shared_embedding_weight)
-            self.model.encoder.embed_tokens.weight = self.lm_head.weight
-            self.model.decoder.embed_tokens.weight = self.lm_head.weight
-            loaded_params.update(
-                {
-                    "model.encoder.embed_tokens.weight",
-                    "lm_head.weight",
-                    "model.decoder.embed_tokens.weight",
-                }
-            )
-        return loaded_params
+# class MBartEncoderLayer(BartEncoderLayer):
+#     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+#         r"""
+#         Args:
+#             hidden_states
+#                 torch.Tensor of *encoder* input embeddings.
+#         Returns:
+#             Encoder layer output torch.Tensor
+#         """
+#         residual = hidden_states
+#         hidden_states = self.self_attn_layer_norm(hidden_states)
+#         hidden_states = self.self_attn(hidden_states=hidden_states)
+
+#         hidden_states = residual + hidden_states
+
+#         residual = hidden_states
+#         hidden_states = self.final_layer_norm(hidden_states)
+#         fc1_out, _ = self.fc1(hidden_states)
+#         hidden_states = self.activation_fn(fc1_out)
+
+#         hidden_states, _ = self.fc2(hidden_states)
+
+#         hidden_states = residual + hidden_states
+
+#         if hidden_states.dtype == torch.float16 and (
+#             torch.isinf(hidden_states).any() or torch.isnan(hidden_states).any()
+#         ):
+#             hidden_states = cast_overflow_tensors(hidden_states)
+
+#         return hidden_states
+
+
+# class MBartDecoderLayer(BartDecoderLayer):
+#     def forward(
+#         self,
+#         decoder_hidden_states: torch.Tensor,
+#         encoder_hidden_states: torch.Tensor | None = None,
+#     ) -> torch.Tensor:
+#         residual = decoder_hidden_states
+#         hidden_states = self.self_attn_layer_norm(decoder_hidden_states)
+
+#         # Self Attention
+#         hidden_states = self.self_attn(hidden_states=hidden_states)
+
+#         hidden_states = residual + hidden_states
+
+#         # Cross-Attention Block
+
+#         residual = hidden_states
+#         hidden_states = self.encoder_attn_layer_norm(hidden_states)
+
+#         hidden_states = self.encoder_attn(
+#             decoder_hidden_states=hidden_states,
+#             encoder_hidden_states=encoder_hidden_states,
+#         )
+
+#         hidden_states = residual + hidden_states
+
+#         # Fully Connected
+#         residual = hidden_states
+#         hidden_states = self.final_layer_norm(hidden_states)
+#         fc1_out, _ = self.fc1(hidden_states)
+#         hidden_states = self.activation_fn(fc1_out)
+
+#         hidden_states, _ = self.fc2(hidden_states)
+
+#         hidden_states = residual + hidden_states
+
+#         return hidden_states
+
+
+# class MBartEncoder(nn.Module):
+#     """
+#     Transformer encoder consisting of *config.encoder_layers*
+#     self attention layers. Each layer is a [`BartEncoderLayer`].
+#     Args:
+#         config: BartConfig
+#         embed_tokens (nn.Embedding): output embedding
+#     """
+
+#     def __init__(
+#         self,
+#         config: BartConfig,
+#         cache_config: CacheConfig | None = None,
+#         quant_config: QuantizationConfig | None = None,
+#         lora_config: LoRAConfig | None = None,
+#         embed_tokens: nn.Embedding | None = None,
+#         prefix: str = "",
+#     ):
+#         super().__init__()
+
+#         self.cache_config = cache_config
+#         self.quant_config = quant_config
+#         self.lora_config = lora_config
+#         embed_dim = config.d_model
+#         self.max_source_positions = config.max_position_embeddings
+#         embed_scale = math.sqrt(embed_dim) if config.scale_embedding else 1.0
+
+#         self.embed_tokens = BartScaledWordEmbedding(
+#             config.vocab_size, embed_dim, embed_scale=embed_scale
+#         )
+
+#         if embed_tokens is not None:
+#             self.embed_tokens.weight = embed_tokens.weight
+
+#         self.embed_positions = BartLearnedPositionalEmbedding(
+#             config.max_position_embeddings,
+#             embed_dim,
+#         )
+#         self.layers = nn.ModuleList(
+#             [
+#                 MBartEncoderLayer(
+#                     config,
+#                     cache_config,
+#                     quant_config,
+#                     prefix=f"{prefix}.layers.{layer_idx}",
+#                 )
+#                 for layer_idx in range(config.encoder_layers)
+#             ]
+#         )
+
+#         self.layernorm_embedding = nn.LayerNorm(embed_dim)
+#         self.layer_norm = nn.LayerNorm(config.d_model)  # 改动
+
+#     def forward(
+#         self,
+#         input_ids: torch.Tensor,
+#         positions: torch.Tensor,
+#         inputs_embeds: torch.Tensor | None = None,
+#     ) -> torch.Tensor:
+#         r"""
+#         Args:
+#             input_ids
+#                 Indices of *encoder* input sequence tokens in the vocabulary.
+#                 Padding will be ignored by default should you
+#                 provide it.
+#             positions
+#                 Positions of *encoder* input sequence tokens.
+#         Returns:
+#             Decoder output torch.Tensor
+#         """
+#         # retrieve input_ids and inputs_embeds
+#         if inputs_embeds is None:
+#             inputs_embeds = self.embed_tokens(input_ids)
+
+#         embed_pos = self.embed_positions(positions)
+#         embed_pos = embed_pos.to(inputs_embeds.device)
+
+#         hidden_states = inputs_embeds + embed_pos
+#         hidden_states = self.layernorm_embedding(hidden_states)
+
+#         for encoder_layer in self.layers:
+#             hidden_states = encoder_layer(hidden_states=hidden_states)
+
+#         hidden_states = self.layer_norm(hidden_states)
+#         return hidden_states
+
+
+# class MBartDecoder(nn.Module):
+#     """
+#     Transformer decoder consisting of *config.decoder_layers* layers.
+#     Each layer is a [`BartDecoderLayer`]
+#     Args:
+#         config: BartConfig
+#         embed_tokens (nn.Embedding): output embedding
+#     """
+
+#     def __init__(
+#         self,
+#         config: BartConfig,
+#         cache_config: CacheConfig | None = None,
+#         quant_config: QuantizationConfig | None = None,
+#         lora_config: LoRAConfig | None = None,
+#         embed_tokens: nn.Embedding | None = None,
+#         prefix: str = "",
+#     ):
+#         super().__init__()
+#         self.cache_config = cache_config
+#         self.quant_config = quant_config
+#         self.lora_config = lora_config
+#         self.max_target_positions = config.max_position_embeddings
+#         embed_scale = math.sqrt(config.d_model) if config.scale_embedding else 1.0
+
+#         self.embed_tokens = BartScaledWordEmbedding(
+#             config.vocab_size, config.d_model, embed_scale=embed_scale
+#         )
+
+#         if embed_tokens is not None:
+#             self.embed_tokens.weight = embed_tokens.weight
+
+#         self.embed_positions = BartLearnedPositionalEmbedding(
+#             config.max_position_embeddings,
+#             config.d_model,
+#         )
+
+#         self.layers = nn.ModuleList(
+#             [
+#                 MBartDecoderLayer(
+#                     config,
+#                     cache_config,
+#                     quant_config,
+#                     prefix=f"{prefix}.layers.{layer_idx}",
+#                 )
+#                 for layer_idx in range(config.decoder_layers)
+#             ]
+#         )
+
+#         self.layernorm_embedding = nn.LayerNorm(config.d_model)
+#         self.layer_norm = nn.LayerNorm(config.d_model)
+
+#     def forward(
+#         self,
+#         decoder_input_ids: torch.Tensor,
+#         decoder_positions: torch.Tensor,
+#         encoder_hidden_states: torch.Tensor | None,
+#         inputs_embeds: torch.Tensor | None = None,
+#     ) -> torch.Tensor:
+#         r"""
+#         Args:
+#             decoder_input_ids
+#                 Indices of *decoder* input sequence tokens in the vocabulary.
+#                 Padding will be ignored by default should you
+#                 provide it.
+#             decoder_positions
+#                 Positions of *decoder* input sequence tokens.
+#             encoder_hidden_states:
+#                 Tensor of encoder output embeddings
+#         Returns:
+#             Decoder output torch.Tensor
+#         """
+#         if inputs_embeds is None:
+#             inputs_embeds = self.embed_tokens(decoder_input_ids)
+#         else:
+#             decoder_positions = inputs_embeds[:, -1]
+
+#         # embed positions
+#         embed_pos = self.embed_positions(decoder_positions)
+#         embed_pos = embed_pos.to(inputs_embeds.device)
+
+#         hidden_states = inputs_embeds + embed_pos
+#         hidden_states = self.layernorm_embedding(hidden_states)
+
+#         # decoder layers
+
+#         for decoder_layer in self.layers:
+#             hidden_states = decoder_layer(
+#                 decoder_hidden_states=hidden_states,
+#                 encoder_hidden_states=encoder_hidden_states,
+#             )
+
+#         hidden_states = self.layer_norm(hidden_states)
+#         return hidden_states
+
+
+# class MBartModel(nn.Module, SupportsQuant):
+#     _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
+
+#     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+#         super().__init__()
+
+#         config = vllm_config.model_config.hf_config
+#         cache_config = vllm_config.cache_config
+#         quant_config = vllm_config.quant_config
+#         lora_config = vllm_config.lora_config
+
+#         self.config = config
+
+#         lora_vocab = (
+#             (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
+#             if lora_config
+#             else 0
+#         )
+#         self.vocab_size = config.vocab_size + lora_vocab
+#         self.org_vocab_size = config.vocab_size
+
+#         self.encoder = MBartEncoder(
+#             config, cache_config, quant_config=quant_config, prefix=f"{prefix}.encoder"
+#         )
+#         self.decoder = MBartDecoder(
+#             config, cache_config, quant_config=quant_config, prefix=f"{prefix}.decoder"
+#         )
+
+#     def forward(
+#         self,
+#         input_ids: torch.Tensor,
+#         positions: torch.Tensor,
+#         encoder_input_ids: torch.Tensor,
+#         encoder_positions: torch.Tensor,
+#     ) -> torch.Tensor:
+#         r"""
+#         Args:
+#             input_ids
+#                 Indices of *decoder* input sequence tokens in the vocabulary.
+#                 Padding will be ignored by default should you
+#                 provide it.
+#             positions
+#                 Positions of *decoder* input sequence tokens.
+#             encoder_input_ids
+#                 Indices of *encoder* input sequence tokens in the vocabulary.
+#             encoder_positions:
+#                 Positions of *encoder* input sequence tokens.
+#         Returns:
+#             Model output torch.Tensor
+#         """
+
+#         encoder_hidden_states = None
+
+#         if encoder_input_ids.numel() > 0:
+#             # Run encoder attention if a non-zero number of encoder tokens
+#             # are provided as input
+#             encoder_hidden_states = self.encoder(
+#                 input_ids=encoder_input_ids, positions=encoder_positions
+#             )
+
+#         # decoder outputs consists of
+#         # (dec_features, past_key_value, dec_hidden, dec_attn)
+#         decoder_outputs = self.decoder(
+#             decoder_input_ids=input_ids,
+#             decoder_positions=positions,
+#             encoder_hidden_states=encoder_hidden_states,
+#         )
+
+#         return decoder_outputs
+
+
+# class MBartProcessingInfo(BaseProcessingInfo):
+#     """Processing information for mBART encoder-decoder models."""
+
+#     def get_hf_config(self) -> BartConfig:
+#         return self.ctx.get_hf_config(BartConfig)
+
+#     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+#         # mBART's encoder input is treated as a "text" modality
+#         # Like BART, mBART just has text for both encoder and decoder
+#         return {"text": 1}
+
+#     def get_mm_max_tokens_per_item(
+#         self,
+#         seq_len: int,
+#         mm_counts: Mapping[str, int],
+#     ) -> Mapping[str, int] | None:
+#         # For mBART, the encoder can handle up to max_position_embeddings tokens
+#         # Return this directly to avoid complex profiling
+#         config = self.get_hf_config()
+#         return {"text": config.max_position_embeddings}
+
+
+# class MBartDummyInputsBuilder(BaseDummyInputsBuilder[MBartProcessingInfo]):
+#     """Builds dummy inputs for profiling mBART models."""
+
+#     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+#         # For mBART, the decoder prompt is separate from encoder
+#         # Return minimal dummy text for decoder
+#         return ""
+
+#     def get_dummy_mm_data(
+#         self,
+#         seq_len: int,
+#         mm_counts: Mapping[str, int],
+#         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+#     ) -> MultiModalDataDict:
+#         # Return dummy encoder text for profiling
+#         num_texts = mm_counts.get("text", 0)
+#         if num_texts == 0:
+#             return {}
+
+#         # Create dummy encoder text of appropriate length
+#         # Use simple repeated words for profiling
+#         dummy_text = " ".join(["word"] * seq_len)
+#         return {"text": dummy_text}
+
+
+# class MBartMultiModalProcessor(EncDecMultiModalProcessor[MBartProcessingInfo]):
+#     """Multimodal processor for mBART encoder-decoder models."""
+
+#     def create_encoder_prompt(
+#         self,
+#         prompt: str | list[int],
+#         mm_data: MultiModalDataDict,
+#     ) -> str | list[int]:
+#         return prompt
+
+#     def create_decoder_prompt(
+#         self,
+#         prompt: str | list[int],
+#         mm_data: MultiModalDataDict,
+#     ) -> str | list[int]:
+#         # The decoder prompt is the original prompt
+#         return prompt
+
+#     def _call_hf_processor(
+#         self,
+#         prompt: str,
+#         mm_data: Mapping[str, object],
+#         mm_kwargs: Mapping[str, object],
+#         tok_kwargs: Mapping[str, object],
+#     ):
+#         """
+#         mBART doesn't have a HuggingFace Processor - it only has a tokenizer.
+#         We tokenize the text directly using the tokenizer.
+#         """
+#         from transformers.feature_extraction_utils import BatchFeature
+
+#         tokenizer = self.info.get_tokenizer()
+
+#         # Tokenize the prompt text
+#         tokenized = tokenizer(
+#             prompt,
+#             add_special_tokens=False,
+#             return_tensors="pt",  # Return PyTorch tensors
+#             **tok_kwargs,
+#         )
+
+#         return BatchFeature(tokenized)
+
+#     def _get_mm_fields_config(
+#         self,
+#         hf_inputs,
+#         hf_processor_mm_kwargs: Mapping[str, object],
+#     ) -> Mapping[str, MultiModalFieldConfig]:
+#         # For mBART, input_ids from tokenization are the encoder input
+#         # We don't have separate multimodal features, just return empty
+#         # The input_ids will be used as encoder input automatically
+#         return {}
+
+#     def _get_prompt_updates(
+#         self,
+#         mm_items: MultiModalDataItems,
+#         hf_processor_mm_kwargs: Mapping[str, object],
+#         out_mm_kwargs: MultiModalKwargsItems,
+#     ) -> Sequence[PromptUpdate]:
+#         from vllm.multimodal.processing import PromptReplacement
+
+#         # Get the number of text items to determine token count
+#         # For mBART, we need to replace the placeholder [0] with the actual
+#         # number of encoder tokens from the text
+#         num_text_items = mm_items.get_count("text", strict=False)
+
+#         if num_text_items == 0:
+#             return []
+
+#         # Get the tokenized length - we'll use the input_ids from out_mm_kwargs
+#         # to determine how many tokens the text actually has
+#         text_items = mm_items.get_items("text", TextProcessorItems)
+#         tokenizer = self.info.get_tokenizer()
+
+#         # Tokenize the first text item to get the number of tokens
+#         text = text_items.get(0)
+#         num_tokens = len(tokenizer.encode(text, add_special_tokens=False))
+
+#         return [
+#             PromptReplacement(
+#                 modality="text",
+#                 target=[0],
+#                 replacement=[0] * num_tokens,
+#             )
+#         ]
+
+
+# @MULTIMODAL_REGISTRY.register_processor(
+#     MBartMultiModalProcessor,
+#     info=MBartProcessingInfo,
+#     dummy_inputs=MBartDummyInputsBuilder,
+# )
+# class MBartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal):
+#     base_model_prefix = "model"
+
+#     hf_to_vllm_mapper = WeightsMapper(
+#         orig_to_new_prefix={
+#             "decoder.": "model.decoder.",
+#             "encoder.": "model.encoder.",
+#             "shared.": "model.shared.",
+#         },
+#         orig_to_new_substr={
+#             "beta": "bias",
+#             "gamma": "weight",
+#             "LayerNorm": "layernorm",
+#         },
+#     )
+
+#     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+#         super().__init__()
+#         config = vllm_config.model_config.hf_config
+#         lora_config = vllm_config.lora_config
+#         assert config.tie_word_embeddings
+#         self.config = config
+#         self.model = MBartModel(
+#             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+#         )
+
+#         self.unpadded_vocab_size = config.vocab_size
+#         if lora_config:
+#             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+
+#         embed_scale = math.sqrt(config.d_model) if config.scale_embedding else 1.0
+
+#         self.lm_head = BartParallelLMHead(
+#             config.vocab_size, config.d_model, embed_scale=embed_scale
+#         )
+
+#         self.logits_processor = LogitsProcessor(
+#             self.unpadded_vocab_size, config.vocab_size
+#         )
+
+#     def forward(
+#         self,
+#         input_ids: torch.Tensor,
+#         positions: torch.Tensor,
+#         intermediate_tensors: IntermediateTensors | None = None,
+#         *,
+#         encoder_input_ids: torch.Tensor,
+#         encoder_positions: torch.Tensor,
+#         **kwargs,
+#     ) -> torch.Tensor:
+#         return self.model(input_ids, positions, encoder_input_ids, encoder_positions)
+
+#     def compute_logits(
+#         self,
+#         hidden_states: torch.Tensor,
+#     ) -> torch.Tensor | None:
+#         logits = self.logits_processor(self.lm_head, hidden_states)
+#         return logits
+
+#     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+#         stacked_params_mapping = [
+#             ("qkv_proj", "q_proj", "q"),
+#             ("qkv_proj", "k_proj", "k"),
+#             ("qkv_proj", "v_proj", "v"),
+#         ]
+#         model_params_dict = dict(self.named_parameters())
+#         loaded_params = set()
+#         remaining_weights = []
+#         shared_embedding_weight = None
+
+#         for name, loaded_weight in weights:
+#             if any(skip in name for skip in ["cls.", "pooler.", "final_logits_bias"]):
+#                 continue
+#             if any(
+#                 embed_name in name
+#                 for embed_name in [
+#                     "shared.weight",
+#                     "encoder.embed_tokens.weight",
+#                     "decoder.embed_tokens.weight",
+#                 ]
+#             ):
+#                 if shared_embedding_weight is None:
+#                     shared_embedding_weight = loaded_weight
+#                 continue
+#             is_stacked = False
+#             for param_name, weight_name, shard_id in stacked_params_mapping:
+#                 if weight_name not in name:
+#                     continue
+#                 vllm_name = name
+#                 for src, dst in self.hf_to_vllm_mapper.orig_to_new_substr.items():
+#                     vllm_name = vllm_name.replace(src, dst)
+#                 for src, dst in self.hf_to_vllm_mapper.orig_to_new_prefix.items():
+#                     if vllm_name.startswith(src):
+#                         vllm_name = dst + vllm_name[len(src) :]
+#                         break
+#                 vllm_name = vllm_name.replace(weight_name, param_name)
+#                 if vllm_name in model_params_dict:
+#                     param = model_params_dict[vllm_name]
+#                     weight_loader = getattr(
+#                         param, "weight_loader", default_weight_loader
+#                     )
+#                     weight_loader(param, loaded_weight, shard_id)
+#                     loaded_params.add(vllm_name)
+#                 is_stacked = True
+#                 break
+#             if not is_stacked:
+#                 remaining_weights.append((name, loaded_weight))
+#         loader = AutoWeightsLoader(self, skip_prefixes=["cls.", "pooler."])
+#         auto_loaded_params = loader.load_weights(
+#             remaining_weights, mapper=self.hf_to_vllm_mapper
+#         )
+#         loaded_params.update(auto_loaded_params)
+#         if shared_embedding_weight is not None:
+#             lm_head_param = self.lm_head.weight
+#             weight_loader = getattr(
+#                 lm_head_param, "weight_loader", default_weight_loader
+#             )
+#             weight_loader(lm_head_param, shared_embedding_weight)
+#             self.model.encoder.embed_tokens.weight = self.lm_head.weight
+#             self.model.decoder.embed_tokens.weight = self.lm_head.weight
+#             loaded_params.update(
+#                 {
+#                     "model.encoder.embed_tokens.weight",
+#                     "lm_head.weight",
+#                     "model.decoder.embed_tokens.weight",
+#                 }
+#             )
+#         return loaded_params

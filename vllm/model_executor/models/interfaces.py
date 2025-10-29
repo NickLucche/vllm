@@ -165,6 +165,7 @@ class SupportsMultiModal(Protocol):
         as an additional buffer is needed to hold the input embeddings.
         """
         from .utils import _merge_multimodal_embeddings
+        logger.info("BART DEBUG -- get_input_embeddings called with input_ids: %s\nmm_embeds %s\n is_multimodal %s\n handle_oov_mm_token %s", input_ids, multimodal_embeddings, is_multimodal, handle_oov_mm_token)
 
         inputs_embeds = self._get_text_embeddings(
             input_ids,

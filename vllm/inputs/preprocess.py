@@ -611,7 +611,7 @@ class InputPreprocessor:
         decoder_inputs: SingletonInputs | None
 
         if is_explicit_encoder_decoder_prompt(prompt):
-            logger.info("BART DEBUG -- explicit encoder-decoder prompt detected")
+            # logger.info("BART DEBUG -- explicit encoder-decoder prompt detected")
             # `cast` is needed for mypy, but not pyright
             prompt_ = cast(ExplicitEncoderDecoderPrompt, prompt)
             logger.info(
@@ -631,6 +631,10 @@ class InputPreprocessor:
             encoder_inputs["encoder_prompt_token_ids"] = encoder_inputs[
                 "prompt_token_ids"
             ]
+            # FIXME we should use some placeholder here to get EEE|DD
+            # FIXME this needs a space to separate
+            # prompt_["decoder_prompt"] = prompt_.get("encoder_prompt", {}).get("prompt", "") + prompt_.get("decoder_prompt", "")
+            print("DECODER INPUTS:", prompt_["decoder_prompt"], "\n")
             if (decoder_input := prompt_["decoder_prompt"]) is None:
                 decoder_inputs = None
             else:
