@@ -1028,23 +1028,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Build encoder_seq_lens array mapping request indices to
         # encoder lengths for inputs scheduled in this batch
         encoder_seq_lens = np.zeros(num_reqs, dtype=np.int32)
-        for req_id, encoder_input_ids in scheduler_output.scheduled_encoder_inputs.items():
-            req_index = self.input_batch.req_id_to_index[req_id]
-            req_state = self.requests[req_id]
+        for req_id in scheduler_output.num_scheduled_tokens.keys():
+            req_index = self.input_batch.req_id_to_index.get(req_id)
+            if req_index is None:
+                continue
 
-            # Get the actual encoder length from the mm_features
-            # For encoder-decoder models like BART, this is the actual input length
-            # For Whisper, this should still be max_encoder_len due to padding
-            if req_state.mm_features:
-                # Sum up all encoder input lengths for this request
-                encoder_len = sum(
-                    req_state.mm_features[input_id].mm_position.length
-                    for input_id in encoder_input_ids
-                )
-                encoder_seq_lens[req_index] = encoder_len
-            else:
-                # Fallback to max_encoder_len for models like Whisper
-                encoder_seq_lens[req_index] = self.max_encoder_len
+            req_state = self.requests.get(req_id)
+            if req_state is None or not req_state.mm_features:
+                continue
+
+            # All encoder inputs are processed together in the first step, then
+            # all are cached for decode. Count all mm_features so that 
+            # cross-attention knows how many cached encoder tokens to attend to
+            encoder_len = sum(
+                feature.mm_position.length
+                for feature in req_state.mm_features
+            )
+
+            encoder_seq_lens[req_index] = encoder_len
 
         return encoder_seq_lens
 
