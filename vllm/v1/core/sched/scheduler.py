@@ -495,6 +495,7 @@ class Scheduler(SchedulerInterface):
                     # always padded to the maximum length. If we support other
                     # encoder-decoder models, this will need to be updated if we
                     # want to only allocate what is needed.
+                    # TODO not required but should update
                     num_encoder_tokens = (
                         self.scheduler_config.max_num_encoder_input_tokens
                     )
