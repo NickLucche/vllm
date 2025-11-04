@@ -47,9 +47,9 @@ params = vllm.SamplingParams(temperature=0.2, max_tokens=20)
 outputs = llm.generate(
     [
         # TODO should default to encoder prompt I think
-        # {
-        #     "prompt": "The president of the United States is",
-        # },
+        {
+            "prompt": "The president of the United States is",
+        },
         # {  # Test explicit encoder/decoder prompt
         #     "encoder_prompt": {
         #         "prompt": "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>",
@@ -59,12 +59,12 @@ outputs = llm.generate(
         #     },
         #     "decoder_prompt": "Donald",
         # },
-        {  # Test explicit encoder/decoder prompt
-            "encoder_prompt": {
-                "prompt": "The president of the United States is",
-            },
-            "decoder_prompt": "Donald",
-        },
+        # {  # Test explicit encoder/decoder prompt
+        #     "encoder_prompt": {
+        #         "prompt": "The president of the United States is",
+        #     },
+        #     "decoder_prompt": "Donald",
+        # },
     ],
     sampling_params=params,
 )
