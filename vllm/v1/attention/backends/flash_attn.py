@@ -37,7 +37,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
-from vllm.utils.math_utils import cdiv
+from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -62,11 +62,7 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_size() -> list[int | MultipleOf]:
-        # NOTE(tdoublep): while in principle, FA supports
-        # MultipleOf(16), these are the block sizes that do not
-        # suffer from the NaN propagation problem described here:
-        # https://github.com/Dao-AILab/flash-attention/issues/1974
-        return [16, 32, 64]
+        return [MultipleOf(16)]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
@@ -165,6 +161,10 @@ class FlashAttentionMetadata:
 
     causal: bool = True
 
+    # For cross-attention (encoder-decoder models)
+    encoder_seq_lens: torch.Tensor | None = None
+    max_encoder_seq_len: int | None = None
+
 
 def _get_sliding_window_configs(
     vllm_config: VllmConfig,
@@ -240,7 +240,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
-        self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
+        self.max_cudagraph_size = self.compilation_config.max_capture_size
 
         if self.use_full_cuda_graph and self.aot_schedule:
             if self.max_cudagraph_size > 992:
@@ -418,6 +418,15 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.scheduler_metadata[n:] = 0
             scheduler_metadata = self.scheduler_metadata[:n]
 
+        # For cross-attention, extract encoder sequence lengths
+        encoder_seq_lens_tensor = None
+        max_encoder_seq_len = None
+        if common_attn_metadata.encoder_seq_lens is not None:
+            encoder_seq_lens_tensor = torch.from_numpy(
+                common_attn_metadata.encoder_seq_lens
+            ).to(device=self.device, dtype=torch.int32)
+            max_encoder_seq_len = int(encoder_seq_lens_tensor.max().item())
+
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -437,7 +446,10 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
             causal=causal,
+            encoder_seq_lens=encoder_seq_lens_tensor,
+            max_encoder_seq_len=max_encoder_seq_len,
         )
+        print("CREATING FA META with causal:", causal, "\n")
         return attn_metadata
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
@@ -611,11 +623,17 @@ class FlashAttentionImpl(AttentionImpl):
 
         if not attn_metadata.use_cascade:
             cu_seqlens_q = attn_metadata.query_start_loc
-            seqused_k = attn_metadata.seq_lens
             max_seqlen_q = attn_metadata.max_query_len
-            max_seqlen_k = attn_metadata.max_seq_len
             block_table = attn_metadata.block_table
             scheduler_metadata = attn_metadata.scheduler_metadata
+
+            # For cross-attention, use encoder sequence lengths
+            if self.attn_type == AttentionType.ENCODER_DECODER:
+                seqused_k = attn_metadata.encoder_seq_lens
+                max_seqlen_k = attn_metadata.max_encoder_seq_len
+            else:
+                seqused_k = attn_metadata.seq_lens
+                max_seqlen_k = attn_metadata.max_seq_len
 
             descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
 
