@@ -387,6 +387,7 @@ class InputPreprocessor:
         prompt_text = parsed_content["prompt"]
 
         inputs: TokenInputs | MultiModalInputs
+        breakpoint()
         if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_text,
@@ -530,7 +531,8 @@ class InputPreprocessor:
         encoder_inputs: SingletonInputs
         decoder_inputs: SingletonInputs
 
-        if inputs["type"] == "multimodal":  # Multimodal data inputs
+        # Multimodal data inputs (including text)
+        if inputs["type"] == "multimodal": 
             logger.info("BART DEBUG -- _split_enc_dec_mm_inputs multimodal inputs")
             if "encoder_prompt_token_ids" not in inputs:
                 raise RuntimeError(
@@ -609,6 +611,13 @@ class InputPreprocessor:
         )
         encoder_inputs: SingletonInputs
         decoder_inputs: SingletonInputs | None
+        breakpoint()
+        # FIXME this thing cannot work, maybe better to start fresh without enc-dec being mm?
+        # issue: _prompt_to_llm_inputs processes encoder prompt, create_encoder_prompt in bart HAS
+        # to work with text input..then decoder_input is processed THE SAME WAY, hence another call
+        # to create_encoder_prompt is made. Basically each call to prompt_to_llm_inputs creates both
+        # encoder and decoder prompts, nonsense.
+        # still doesnt work with single prompt, will forward all context to decoder
 
         if is_explicit_encoder_decoder_prompt(prompt):
             # logger.info("BART DEBUG -- explicit encoder-decoder prompt detected")
@@ -631,10 +640,8 @@ class InputPreprocessor:
             encoder_inputs["encoder_prompt_token_ids"] = encoder_inputs[
                 "prompt_token_ids"
             ]
-            # FIXME we should use some placeholder here to get EEE|DD
-            # FIXME this needs a space to separate
-            # prompt_["decoder_prompt"] = prompt_.get("encoder_prompt", {}).get("prompt", "") + prompt_.get("decoder_prompt", "")
             print("DECODER INPUTS:", prompt_["decoder_prompt"], "\n")
+            breakpoint()
             if (decoder_input := prompt_["decoder_prompt"]) is None:
                 decoder_inputs = None
             else:
@@ -648,6 +655,7 @@ class InputPreprocessor:
                     encoder_inputs,
                     decoder_inputs,
                 )
+                breakpoint()
                 encoder_inputs, decoder_inputs = self._split_enc_dec_mm_inputs(
                     encoder_inputs, decoder_inputs
                 )
@@ -667,6 +675,7 @@ class InputPreprocessor:
             )
             if self.model_config.is_multimodal_model:
                 # Encoder-Decoder Multimodal model
+                breakpoint()
                 encoder_inputs, decoder_inputs = self._split_enc_dec_mm_inputs(inputs)
             else:
                 encoder_inputs = inputs

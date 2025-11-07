@@ -314,6 +314,7 @@ class BartCrossAttention(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        self.prefix = prefix
         self.d_model = config.d_model
         self.embed_dim = embed_dim
         self.total_num_heads = num_heads
@@ -378,8 +379,14 @@ class BartCrossAttention(nn.Module):
         """Input shape: Batch x Time x Channel"""
 
         q, k, v = self.qkv_proj(decoder_hidden_states, encoder_hidden_states)
-
+        # if "layers.0." in self.prefix and k is not None:
+        #     # break on first layer
+        #     print("Inputs to crossattention", q.mean(), q.std(), q.isnan().any(), k.mean(), k.std(), k.isnan().any(), v.mean(), v.std(), v.isnan().any(),"\n")
         attn_output = self.attn(q, k, v)
+        # if "layers.0." in self.prefix and k is not None:
+        # if "layers.0." in self.prefix and k is None:
+        #     breakpoint()
+            # print("Cross Attention Attn Output", attn_output.mean(), attn_output.std(), attn_output.isnan().any(),"\n")
 
         output, _ = self.out_proj(attn_output)
         return output
@@ -528,11 +535,11 @@ class BartDecoderLayer(nn.Module):
 
         # Self Attention
         hidden_states = self.self_attn(hidden_states=decoder_hidden_states)
-        print("BART DECODER SELF ATTN", hidden_states.mean(), hidden_states.std(), "\n")
+        # print("BART DECODER SELF ATTN", hidden_states.mean(), hidden_states.std(), "\n")
 
         hidden_states = residual + hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
-        print("BART DECODER SELF ATTN LAYER NORM", hidden_states.mean(), hidden_states.std(), "\n")
+        # print("BART DECODER SELF ATTN LAYER NORM", hidden_states.mean(), hidden_states.std(), "\n")
         # Cross-Attention Block
 
         residual = hidden_states
@@ -541,7 +548,7 @@ class BartDecoderLayer(nn.Module):
             decoder_hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
         )
-        print("BART DECODER CROSS ATTN", hidden_states.mean(), hidden_states.std(), "\n")
+        # print("BART DECODER CROSS ATTN", hidden_states.mean(), hidden_states.std(), "\n")
 
         hidden_states = residual + hidden_states
         hidden_states = self.encoder_attn_layer_norm(hidden_states)
@@ -910,7 +917,16 @@ class BartMultiModalProcessor(EncDecMultiModalProcessor[BartProcessingInfo]):
         prompt: str | list[int],
         mm_data: MultiModalDataDict,
     ) -> str | list[int]:
-        return [0]
+        if not prompt:
+            return [0]
+        tokenizer = self.info.get_tokenizer()
+        tokens = tokenizer(
+            prompt,
+            add_special_tokens=False,
+            return_tensors="pt",
+        )['input_ids'].flatten()
+        print("BART ENCODER PROMPT TOKENS", prompt, tokens, "\n")
+        return tokens.tolist()
 
     def create_decoder_prompt(
         self,
@@ -936,7 +952,8 @@ class BartMultiModalProcessor(EncDecMultiModalProcessor[BartProcessingInfo]):
         tokenizer = self.info.get_tokenizer()
 
         # For BART encoder-decoder: check if we have encoder text data
-        has_encoder_data = mm_data and "texts" in mm_data
+        # breakpoint()
+        has_encoder_data = mm_data is not None and "texts" in mm_data
         # logger.info("BART DEBUG - mm_data: %s", mm_data)
         # logger.info("BART DEBUG - mm_kwargs: %s", mm_kwargs)
         # logger.info("BART DEBUG - tok_kwargs: %s", tok_kwargs)
