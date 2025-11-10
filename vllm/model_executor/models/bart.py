@@ -38,7 +38,6 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
-    QKVCrossParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
@@ -55,7 +54,7 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import MultiModalDataItems, TextProcessorItems
+from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseProcessingInfo,
     EncDecMultiModalProcessor,
@@ -329,14 +328,48 @@ class BartCrossAttention(nn.Module):
             )
         self.scaling = self.head_dim**-0.5
 
-        # TP sharding sizes is accounted for within "*Parallel" layers.
-        self.qkv_proj = QKVCrossParallelLinear(
-            self.d_model,
-            self.d_model // self.total_num_heads,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias,
+        # encoder_attn.k_proj.bias', 
+        # 'encoder_attn.k_proj.weight', 
+        # 'encoder_attn.q_proj.bias', 
+        # 'encoder_attn.q_proj.weight', 'encoder_attn.v_proj.bias', 
+        # 'encoder_attn.v_proj.weight', 'encoder_attn_layer_norm.bias', 
+        # 'encoder_attn_layer_norm.weight'
+        self.q_proj = ColumnParallelLinear(
+            input_size=embed_dim,
+            output_size=embed_dim,
+            bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.q_proj",
+        )
+        # TODO unify matrix for efficiency
+        # self.kv_proj = QKVParallelLinear(
+        #     hidden_size=embed_dim,
+        #     head_size=self.head_dim,
+        #     total_num_heads=0,
+        #     total_num_kv_heads=self.total_num_heads,
+        #     bias=bias,
+        #     quant_config=quant_config,
+        #     prefix=f"{prefix}.kv_proj",
+        # )
+        # This is how weights are split in the checkpoint. Should 
+        # be unified for efficiency.
+        self.k_proj = QKVParallelLinear(
+            hidden_size=embed_dim,
+            head_size=self.head_dim,
+            total_num_heads=0,
+            total_num_kv_heads=self.total_num_heads//2,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.k_proj",
+        )
+        self.v_proj = QKVParallelLinear(
+            hidden_size=embed_dim,
+            head_size=self.head_dim,
+            total_num_heads=0,
+            total_num_kv_heads=self.total_num_heads//2,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.v_proj",
         )
 
         self.out_proj = RowParallelLinear(
@@ -377,7 +410,17 @@ class BartCrossAttention(nn.Module):
     ) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
 
-        q, k, v = self.qkv_proj(decoder_hidden_states, encoder_hidden_states)
+        q, _ = self.q_proj(decoder_hidden_states)
+
+        # Encoder hidden states are only computed once during prefill phase.
+        # Afterwards, the keys and values should be available in the kv-cache.
+        if encoder_hidden_states is not None:
+            # kv, _ = self.kv_proj(encoder_hidden_states)
+            # k, v = kv.split([self.kv_size, self.kv_size], dim=-1)
+            k, _ = self.k_proj(encoder_hidden_states)
+            v, _ = self.v_proj(encoder_hidden_states)
+        else:
+            k = v = None
 
         attn_output = self.attn(q, k, v)
 
