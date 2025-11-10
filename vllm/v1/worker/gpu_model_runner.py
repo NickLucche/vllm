@@ -2216,6 +2216,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_input_tokens, intermediate_tensors, True
             )
 
+        breakpoint()
         if (
             self.model_config.is_encoder_decoder
             and scheduler_output.scheduled_encoder_inputs

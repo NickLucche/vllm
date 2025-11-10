@@ -328,12 +328,6 @@ class BartCrossAttention(nn.Module):
             )
         self.scaling = self.head_dim**-0.5
 
-        # encoder_attn.k_proj.bias', 
-        # 'encoder_attn.k_proj.weight', 
-        # 'encoder_attn.q_proj.bias', 
-        # 'encoder_attn.q_proj.weight', 'encoder_attn.v_proj.bias', 
-        # 'encoder_attn.v_proj.weight', 'encoder_attn_layer_norm.bias', 
-        # 'encoder_attn_layer_norm.weight'
         self.q_proj = ColumnParallelLinear(
             input_size=embed_dim,
             output_size=embed_dim,
@@ -342,35 +336,35 @@ class BartCrossAttention(nn.Module):
             prefix=f"{prefix}.q_proj",
         )
         # TODO unify matrix for efficiency
-        # self.kv_proj = QKVParallelLinear(
+        self.kv_proj = QKVParallelLinear(
+            hidden_size=embed_dim,
+            head_size=self.head_dim,
+            total_num_heads=0,
+            total_num_kv_heads=self.total_num_heads,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.kv_proj",
+        )
+        # This is how weights are split in the checkpoint. Should 
+        # be unified for efficiency.
+        # self.k_proj = QKVParallelLinear(
         #     hidden_size=embed_dim,
         #     head_size=self.head_dim,
         #     total_num_heads=0,
-        #     total_num_kv_heads=self.total_num_heads,
+        #     total_num_kv_heads=self.total_num_heads//2,
         #     bias=bias,
         #     quant_config=quant_config,
-        #     prefix=f"{prefix}.kv_proj",
+        #     prefix=f"{prefix}.k_proj",
         # )
-        # This is how weights are split in the checkpoint. Should 
-        # be unified for efficiency.
-        self.k_proj = QKVParallelLinear(
-            hidden_size=embed_dim,
-            head_size=self.head_dim,
-            total_num_heads=0,
-            total_num_kv_heads=self.total_num_heads//2,
-            bias=bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.k_proj",
-        )
-        self.v_proj = QKVParallelLinear(
-            hidden_size=embed_dim,
-            head_size=self.head_dim,
-            total_num_heads=0,
-            total_num_kv_heads=self.total_num_heads//2,
-            bias=bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.v_proj",
-        )
+        # self.v_proj = QKVParallelLinear(
+        #     hidden_size=embed_dim,
+        #     head_size=self.head_dim,
+        #     total_num_heads=0,
+        #     total_num_kv_heads=self.total_num_heads//2,
+        #     bias=bias,
+        #     quant_config=quant_config,
+        #     prefix=f"{prefix}.v_proj",
+        # )
 
         self.out_proj = RowParallelLinear(
             embed_dim,
@@ -415,10 +409,10 @@ class BartCrossAttention(nn.Module):
         # Encoder hidden states are only computed once during prefill phase.
         # Afterwards, the keys and values should be available in the kv-cache.
         if encoder_hidden_states is not None:
-            # kv, _ = self.kv_proj(encoder_hidden_states)
-            # k, v = kv.split([self.kv_size, self.kv_size], dim=-1)
-            k, _ = self.k_proj(encoder_hidden_states)
-            v, _ = self.v_proj(encoder_hidden_states)
+            kv, _ = self.kv_proj(encoder_hidden_states)
+            k, v = kv.split([self.kv_size, self.kv_size], dim=-1)
+            # k, _ = self.k_proj(encoder_hidden_states)
+            # v, _ = self.v_proj(encoder_hidden_states)
         else:
             k = v = None
 
@@ -571,11 +565,11 @@ class BartDecoderLayer(nn.Module):
 
         # Self Attention
         hidden_states = self.self_attn(hidden_states=decoder_hidden_states)
-        print("BART DECODER SELF ATTN", hidden_states.mean(), hidden_states.std(), "\n")
+        # print("BART DECODER SELF ATTN", hidden_states.mean(), hidden_states.std(), "\n")
 
         hidden_states = residual + hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
-        print("BART DECODER SELF ATTN LAYER NORM", hidden_states.mean(), hidden_states.std(), "\n")
+        # print("BART DECODER SELF ATTN LAYER NORM", hidden_states.mean(), hidden_states.std(), "\n")
         # Cross-Attention Block
 
         residual = hidden_states
@@ -584,7 +578,7 @@ class BartDecoderLayer(nn.Module):
             decoder_hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
         )
-        print("BART DECODER CROSS ATTN", hidden_states.mean(), hidden_states.std(), "\n")
+        # print("BART DECODER CROSS ATTN", hidden_states.mean(), hidden_states.std(), "\n")
 
         hidden_states = residual + hidden_states
         hidden_states = self.encoder_attn_layer_norm(hidden_states)
@@ -865,14 +859,19 @@ class BartModel(nn.Module, SupportsQuant):
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
         ]
+        cross_attn_stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("kv_proj", "k_proj", "k"),
+            ("kv_proj", "v_proj", "v"),
+        ]
 
         other_weights = []
         loaded_stacked_params = []
         model_params_dict = dict(self.named_parameters())
 
         for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
+            for param_name, weight_name, shard_id in cross_attn_stacked_params_mapping:
+                if weight_name not in name or "encoder_attn" not in name:
                     continue
                 name = name.replace(weight_name, param_name)
                 if name not in model_params_dict:
@@ -883,8 +882,22 @@ class BartModel(nn.Module, SupportsQuant):
                 loaded_stacked_params.append(name)
                 break
             else:
-                if name in model_params_dict:
-                    other_weights.append((name, loaded_weight))
+                for param_name, weight_name, shard_id in stacked_params_mapping:
+                    if weight_name not in name or "encoder_attn" in name:
+                        # Also skip q_proj in cross_attn which 
+                        # can be loaded normally
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    if name not in model_params_dict:
+                        continue
+                    param = model_params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
+                    loaded_stacked_params.append(name)
+                    break
+                else:
+                    if name in model_params_dict:
+                        other_weights.append((name, loaded_weight))
 
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(other_weights)
@@ -1027,39 +1040,42 @@ class BartMultiModalProcessor(EncDecMultiModalProcessor[BartProcessingInfo]):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         from vllm.multimodal.processing import PromptReplacement
+        print(mm_items, "\n")
+        assert False
 
         # Get the number of text items to determine token count
         # For BART, we need to replace the placeholder [0] with the actual
         # number of encoder tokens from the text
-        num_text_items = mm_items.get_count("text", strict=False)
+        # num_text_items = mm_items.get_count("text", strict=False)
 
-        if num_text_items == 0:
-            return []
+        # if num_text_items == 0:
+        #     return []
 
-        # Get the tokenized length - we'll use the input_ids from out_mm_kwargs
-        # to determine how many tokens the text actually has
-        text_items = mm_items.get_items("text", TextProcessorItems)
-        tokenizer = self.info.get_tokenizer()
+        # # Get the tokenized length - we'll use the input_ids from out_mm_kwargs
+        # # to determine how many tokens the text actually has
+        # text_items = mm_items.get_items("text", TextProcessorItems)
+        # tokenizer = self.info.get_tokenizer()
 
-        # Tokenize the first text item to get the number of tokens
-        text = text_items.get(0)
-        num_tokens = len(tokenizer.encode(text, add_special_tokens=False))
+        # # Tokenize the first text item to get the number of tokens
+        # text = text_items.get(0)
+        # num_tokens = len(tokenizer.encode(text, add_special_tokens=False))
 
-        return [
-            PromptReplacement(
-                modality="text",
-                target=[0],
-                replacement=[0] * num_tokens,
-            )
-        ]
+        # return [
+        #     PromptReplacement(
+        #         modality="text",
+        #         target=[0],
+        #         replacement=[0] * num_tokens,
+        #     )
+        # ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    BartMultiModalProcessor,
-    info=BartProcessingInfo,
-    dummy_inputs=BartDummyInputsBuilder,
-)
-class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal):
+# @MULTIMODAL_REGISTRY.register_processor(
+#     BartMultiModalProcessor,
+#     info=BartProcessingInfo,
+#     dummy_inputs=BartDummyInputsBuilder,
+# )
+# class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal):
+class BartForConditionalGeneration(nn.Module, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "decoder.": "model.decoder.",
@@ -1099,6 +1115,16 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
 
     def get_language_model(self) -> nn.Module:
         return self.model.decoder
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+        handle_oov_mm_token: bool = False,
+    ) -> torch.Tensor:
+        return self.model.decoder.get_input_embeddings(input_ids)
 
     def get_multimodal_embeddings(self, **kwargs) -> MultiModalEmbeddings:
         # breakpoint()
