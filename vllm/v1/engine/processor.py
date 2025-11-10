@@ -402,7 +402,6 @@ class Processor:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
-        logger.info("BART DEBUG -- prompt: %s", prompt)
         processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
             prompt,
             tokenization_kwargs=tokenization_kwargs,
@@ -418,10 +417,7 @@ class Processor:
 
         eos_token_id = self.input_preprocessor.get_eos_token_id()
 
-        logger.info("BART DEBUG -- processed_inputs: %s", processed_inputs)
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
-        logger.info("BART DEBUG -- encoder_inputs: %s", encoder_inputs)
-        logger.info("BART DEBUG -- decoder_inputs: %s", decoder_inputs)
         self._validate_model_inputs(encoder_inputs, decoder_inputs)
 
         # Mypy does not always properly infer the types of some elements of
@@ -439,7 +435,6 @@ class Processor:
             else None
         )
         encoder_token_ids = encoder_inputs["prompt_token_ids"] if encoder_inputs else []
-        logger.info("BART DEBUG -- encoder_token_ids: %s", encoder_token_ids)
 
         sampling_params = None
         pooling_params = None
@@ -510,7 +505,6 @@ class Processor:
                 )
             )
 
-        logger.info("BART DEBUG -- mm_features: %s", mm_features)
 
         return EngineCoreRequest(
             request_id=request_id,

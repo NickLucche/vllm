@@ -449,7 +449,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             encoder_seq_lens=encoder_seq_lens_tensor,
             max_encoder_seq_len=max_encoder_seq_len,
         )
-        print("CREATING FA META with causal:", causal, "\n")
         return attn_metadata
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:

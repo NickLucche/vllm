@@ -379,15 +379,7 @@ class BartCrossAttention(nn.Module):
         """Input shape: Batch x Time x Channel"""
 
         q, k, v = self.qkv_proj(decoder_hidden_states, encoder_hidden_states)
-        # if "layers.0." in self.prefix and k is not None:
-        #     # break on first layer
-        #     print("Inputs to crossattention", q.mean(), q.std(), q.isnan().any(), k.mean(), k.std(), k.isnan().any(), v.mean(), v.std(), v.isnan().any(),"\n")
         attn_output = self.attn(q, k, v)
-        # if "layers.0." in self.prefix and k is not None:
-        # if "layers.0." in self.prefix and k is None:
-        #     breakpoint()
-            # print("Cross Attention Attn Output", attn_output.mean(), attn_output.std(), attn_output.isnan().any(),"\n")
-
         output, _ = self.out_proj(attn_output)
         return output
 
@@ -535,11 +527,9 @@ class BartDecoderLayer(nn.Module):
 
         # Self Attention
         hidden_states = self.self_attn(hidden_states=decoder_hidden_states)
-        # print("BART DECODER SELF ATTN", hidden_states.mean(), hidden_states.std(), "\n")
 
         hidden_states = residual + hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
-        # print("BART DECODER SELF ATTN LAYER NORM", hidden_states.mean(), hidden_states.std(), "\n")
         # Cross-Attention Block
 
         residual = hidden_states
@@ -548,7 +538,6 @@ class BartDecoderLayer(nn.Module):
             decoder_hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
         )
-        # print("BART DECODER CROSS ATTN", hidden_states.mean(), hidden_states.std(), "\n")
 
         hidden_states = residual + hidden_states
         hidden_states = self.encoder_attn_layer_norm(hidden_states)
@@ -725,16 +714,10 @@ class BartDecoder(nn.Module):
         Returns:
             Decoder output torch.Tensor
         """
-        # breakpoint()
         print("BART DECODER INPUT_IDS", decoder_input_ids, "\n")
         if inputs_embeds is None:
             assert decoder_input_ids is not None
             inputs_embeds = self.get_input_embeddings(decoder_input_ids)
-            print("BARD DECODED ENCODED input_ids", inputs_embeds.shape, "\n")
-        # else:
-        #     assert decoder_input_ids is None
-        #     # TODO review this
-        #     decoder_positions = inputs_embeds[:, -1]
 
         # embed positions
         embed_pos = self.embed_positions(decoder_positions)
@@ -744,8 +727,6 @@ class BartDecoder(nn.Module):
         hidden_states = self.layernorm_embedding(hidden_states)
 
         # decoder layers
-        # print("ENCODER HIDDEN STATES", encoder_hidden_states, "\n")
-        # print(" HIDDEN STATES", hidden_states, "\n")
         for decoder_layer in self.layers:
             hidden_states = decoder_layer(
                 decoder_hidden_states=hidden_states,
@@ -892,12 +873,6 @@ class BartDummyInputsBuilder(BaseDummyInputsBuilder[BartProcessingInfo]):
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
-        # logger.info(
-        #     "BART DEBUG -- seq_len: %s, mm_counts: %s, mm_options: %s",
-        #     seq_len,
-        #     mm_counts,
-        #     mm_options,
-        # )
         # Return dummy encoder text for profiling
         num_texts = mm_counts.get("text", 0)
         if num_texts == 0:
@@ -925,7 +900,6 @@ class BartMultiModalProcessor(EncDecMultiModalProcessor[BartProcessingInfo]):
             add_special_tokens=False,
             return_tensors="pt",
         )['input_ids'].flatten()
-        print("BART ENCODER PROMPT TOKENS", prompt, tokens, "\n")
         return tokens.tolist()
 
     def create_decoder_prompt(
@@ -952,13 +926,7 @@ class BartMultiModalProcessor(EncDecMultiModalProcessor[BartProcessingInfo]):
         tokenizer = self.info.get_tokenizer()
 
         # For BART encoder-decoder: check if we have encoder text data
-        # breakpoint()
         has_encoder_data = mm_data is not None and "texts" in mm_data
-        # logger.info("BART DEBUG - mm_data: %s", mm_data)
-        # logger.info("BART DEBUG - mm_kwargs: %s", mm_kwargs)
-        # logger.info("BART DEBUG - tok_kwargs: %s", tok_kwargs)
-        # logger.info("BART DEBUG - prompt %s", prompt)
-
         result = {}
 
         if has_encoder_data:
@@ -1075,14 +1043,10 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
         return self.model.decoder
 
     def get_multimodal_embeddings(self, **kwargs) -> MultiModalEmbeddings:
-        # breakpoint()
         # Required as part of SupportsMultiModal interface.
         # For BART, we parse the encoder_input_ids and return encoder outputs
-        logger.info("BART DEBUG -- get_mm kwargs: %s", kwargs)
         encoder_input_ids_list = self._parse_and_validate_encoder_input(**kwargs)
-        logger.info("BART DEBUG -- get_mm encoder_input_ids_list: %s", [e.shape for e in encoder_input_ids_list])
 
-        print("BART ENCODER OUTPUT", encoder_input_ids_list, "\n")
         if not encoder_input_ids_list:
             raise ValueError(
                 "encoder_input_ids_list is empty - this should not happen. "
@@ -1090,7 +1054,7 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
             )
 
         # Process each encoder input separately and return a list of outputs
-        # FIXME why the loop here?
+        # FIXME why the loop here? should process in batch
         encoder_outputs = []
         for encoder_input_ids in encoder_input_ids_list:
             # Flatten to 1D tensor if needed
@@ -1151,17 +1115,6 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
                 encoder_input_ids = encoder_input_ids.unsqueeze(0)
             return [encoder_input_ids]
 
-    # def get_input_embeddings(
-    #     self,
-    #     input_ids: torch.Tensor,
-    #     multimodal_embeddings: MultiModalEmbeddings | None= None,
-    #     *,
-    #     is_multimodal: torch.Tensor | None = None,
-    #     handle_oov_mm_token: bool = False,
-    # ) -> torch.Tensor:        
-    #     logger.info("BART DEBUG -- get_input_embeddings called with input_ids: %s\nmm_embeds %s\n is_multimodal %s\n handle_oov_mm_token %s", input_ids, multimodal_embeddings, is_multimodal, handle_oov_mm_token)
-    #     return super().get_input_embeddings(input_ids, multimodal_embeddings, is_multimodal, handle_oov_mm_token)
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -1192,16 +1145,7 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
             print("BART FORWARD CALLED WITH encoder_outputs:", encoder_outputs.shape, "\n")
         else:
             print("BART FORWARD CALLED WITH encoder_outputs: None", "\n")
-        # if num_encoder_outputs is None:
-        #     encoder_outputs = None
-        # else:
-        #     # TODO does this affect cuda graphs buffers?
-        #     encoder_outputs, inputs_embeds = inputs_embeds[:num_encoder_outputs], inputs_embeds[num_encoder_outputs:]
-        #     # print("BART FORWARD CALLED WITH encoder_outputs:", encoder_outputs.shape, "\n")
-        #     # print("BART FORWARD CALLED WITH inputs_embeds:", inputs_embeds.shape, "\n")
-        #     # TODO is it really better with splitting? Basically we're moving enc-dec specific logic (the diff with MM)
-        #     # from vllm to model def..I guess this isn't too bad for OOT model  
-        #     positions = positions[num_encoder_outputs:]
+
         print("BART FWD INPUT IDS", input_ids)
         return self.model(input_ids, positions, inputs_embeds, encoder_outputs=encoder_outputs)
 

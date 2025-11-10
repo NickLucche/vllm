@@ -2028,7 +2028,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             )
             self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
         else:
-            breakpoint()
             prompt_ids, mm_placeholders = self._apply_prompt_updates(
                 prompt_ids,
                 mm_prompt_updates,
@@ -2131,7 +2130,6 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         encoder_inputs: MultiModalInputs,
     ):
         tokenizer = self.info.get_tokenizer()
-        breakpoint()
         decoder_prompt_raw = self.create_decoder_prompt(prompt, mm_data)
         if isinstance(decoder_prompt_raw, str):
             decoder_prompt_ids = encode_tokens(
@@ -2164,8 +2162,6 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         3. Copy the input prompt text as decoder prompt inputs.
         """
         encoder_prompt = self.create_encoder_prompt(prompt, mm_data)
-        print("BART ENCODER PROMPT CALL", encoder_prompt, "\n")
-        breakpoint()
         encoder_inputs = super().apply(
             encoder_prompt,
             mm_data,

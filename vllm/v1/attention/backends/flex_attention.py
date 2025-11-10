@@ -502,7 +502,6 @@ class FlexAttentionMetadata:
         and their position.
 
         """
-        print("BUILDING MASK CAUSALFOR :", self.causal, self.num_actual_tokens, "\n")
         page_to_block_ratio = self.kv_block_size // self.block_size
         if page_to_block_ratio != 1:
             raise ValueError(
@@ -545,8 +544,6 @@ class FlexAttentionMetadata:
     def build_block_mask(self) -> BlockMask:
         mask_mod = self.get_mask_mod()
         kv_len = self.total_cache_tokens if self.causal else self.num_actual_tokens
-        print("BUILDING MASK:", self.causal, self.num_actual_tokens, kv_len, "\n")
-        # breakpoint()
         return create_block_mask_compiled(
             mask_mod,
             None,
@@ -558,7 +555,6 @@ class FlexAttentionMetadata:
         )
 
     def __post_init__(self):
-        print("FLEX ATTENTION METADATA POST INIT CALLED", self.num_actual_tokens, "\n")
         assert self.use_cascade is False, "Not implemented yet."
         assert self.common_prefix_len == 0, "Not implemented yet."
         assert self.cu_prefix_query_lens is None, "Not implemented yet."
@@ -668,7 +664,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             q_block_size=self.q_block_size,
             kv_block_size=self.kv_block_size,
         )
-        print("BUILDING FLEX META with causal:", common_attn_metadata.causal, "\n")
         return out
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:

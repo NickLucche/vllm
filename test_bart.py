@@ -1,15 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Basic offline inference for gemma3n
-
-
 import vllm
 
-#
 # model_name = "facebook/mbart-large-en-ro"
-# model_name = "openai/whisper-small"
 model_name = "facebook/bart-large-cnn"
-# model_name = "Qwen/Qwen3-0.6B"
 
 # NOTE important to NOT split the item, set it in config (IF NOT ALREADY SET)
 llm = vllm.LLM(
@@ -26,12 +21,6 @@ llm = vllm.LLM(
 
 #   hf_overrides={"architectures": ["MBartForConditionalGeneration"]}
 
-# image = Image.open("image.jpg")
-# image2 = ImageAsset("cherry_blossom").pil_image
-# image = ImageAsset("cherry_blossom").pil_image
-# assert image.size != image2.size
-# audio = librosa.load("/home/nicolo/speech.wav", sr=16_000)
-# audio2 = AudioAsset("mary_had_lamb").audio_and_sample_rate
 
 from transformers import AutoTokenizer
 
@@ -43,32 +32,37 @@ print(
 )
 print("PROMPT decoder:", tokenizer.encode("Donald", add_special_tokens=False), "\n")
 
-params = vllm.SamplingParams(temperature=0.2, max_tokens=20)
+params = vllm.SamplingParams(temperature=0.0, max_tokens=20)
+# FIXME working with explicit encoder/decoder prompt only!
 outputs = llm.generate(
     [
-        # TODO should default to encoder prompt I think
-        {
-            "prompt": "The president of the United States is",
+        # {
+        #     "prompt": "The president of the United States is",
+        # },
+        {  # Test explicit encoder/decoder prompt
+        # <s> for empty prompt
+            "encoder_prompt": {
+                "prompt": "The president of the United States is",
+            },
+            "decoder_prompt": "<s>Donald",
         },
-        # {  # Test explicit encoder/decoder prompt
-        #     "encoder_prompt": {
-        #         "prompt": "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>",
-        #         "multi_modal_data": {
-        #             "audio": AudioAsset("mary_had_lamb").audio_and_sample_rate,
-        #         },
-        #     },
-        #     "decoder_prompt": "Donald",
-        # },
-        # {  # Test explicit encoder/decoder prompt
-        #     "encoder_prompt": {
-        #         "prompt": "The president of the United States is",
-        #     },
-        #     "decoder_prompt": "Donald",
-        # },
+        { 
+        # <s> for empty prompt
+            "encoder_prompt": {
+                "prompt": "<s>",
+            },
+            "decoder_prompt": "<s>Ronald McDonald is",
+        },
     ],
     sampling_params=params,
 )
+# TODO output is really sensible to the BOS token which should always be present in decoder promtp!
+# No <s> token:
+# output: . The president of the United States is president of the United States is president of the United States is
+# With <s> token:
+# output:  Trump is president of the United States. The president of the United States is president of the United States
 
+# NOTE same thing for empty encoder_promt: should be set to BOS. So ""->"<s>"
 for o in outputs:
     generated_text = o.outputs[0].text
     print("output:", generated_text)
