@@ -38,7 +38,6 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
-    QKVCrossParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
@@ -329,15 +328,27 @@ class BartCrossAttention(nn.Module):
                 f" and `num_heads`: {num_heads})."
             )
         self.scaling = self.head_dim**-0.5
+        self.kv_size = self.total_num_kv_heads * self.head_dim
 
-        # TP sharding sizes is accounted for within "*Parallel" layers.
-        self.qkv_proj = QKVCrossParallelLinear(
-            self.d_model,
-            self.d_model // self.total_num_heads,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias,
+        # Q_proj for projecting decoder hidden states
+        self.q_proj = ColumnParallelLinear(
+            input_size=embed_dim,
+            output_size=embed_dim,
+            bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.q_proj",
+        )
+
+        # KV_proj for projecting encoder hidden states with no overhead of 
+        # unused Q_proj by setting total_num_heads to 0
+        self.kv_proj = QKVParallelLinear(
+            hidden_size=embed_dim,
+            head_size=self.head_dim,
+            total_num_heads=0,
+            total_num_kv_heads=self.total_num_kv_heads,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.kv_proj",
         )
 
         self.out_proj = RowParallelLinear(
@@ -378,7 +389,16 @@ class BartCrossAttention(nn.Module):
     ) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
 
-        q, k, v = self.qkv_proj(decoder_hidden_states, encoder_hidden_states)
+        q, _ = self.q_proj(decoder_hidden_states)
+
+        # Encoder hidden states are only computed once during prefill phase.
+        # Afterwards, the keys and values should be available in the kv-cache.
+        if encoder_hidden_states is not None:
+            kv, _ = self.kv_proj(encoder_hidden_states)
+            k, v = kv.split([self.kv_size, self.kv_size], dim=-1)
+        else:
+            k = v = None
+
         attn_output = self.attn(q, k, v)
         output, _ = self.out_proj(attn_output)
         return output
@@ -810,14 +830,20 @@ class BartModel(nn.Module, SupportsQuant):
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
         ]
+        # Unify kv only for cross-attention, while keeping q separate
+        cross_attn_stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("kv_proj", "k_proj", "k"),
+            ("kv_proj", "v_proj", "v"),
+        ]
 
         other_weights = []
         loaded_stacked_params = []
         model_params_dict = dict(self.named_parameters())
 
         for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
+            for param_name, weight_name, shard_id in cross_attn_stacked_params_mapping:
+                if weight_name not in name or "encoder_attn" not in name:
                     continue
                 name = name.replace(weight_name, param_name)
                 if name not in model_params_dict:
@@ -828,8 +854,23 @@ class BartModel(nn.Module, SupportsQuant):
                 loaded_stacked_params.append(name)
                 break
             else:
-                if name in model_params_dict:
-                    other_weights.append((name, loaded_weight))
+                for param_name, weight_name, shard_id in stacked_params_mapping:
+                    if weight_name not in name or "encoder_attn" in name:
+                        # Also skip q_proj in cross_attn which 
+                        # can be loaded normally
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    if name not in model_params_dict:
+                        continue
+                    param = model_params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
+                    loaded_stacked_params.append(name)
+                    break
+                else:
+                    if name in model_params_dict:
+                        other_weights.append((name, loaded_weight))
+
 
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(other_weights)
