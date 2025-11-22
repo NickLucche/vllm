@@ -22,6 +22,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
 
 import torch
 from torch import nn
@@ -48,13 +49,19 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
+from vllm.multimodal import MULTIMODAL_REGISTRY, ModalityData
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import MultiModalDataItems, TextProcessorItems
+from vllm.multimodal.parse import (
+    ModalityDataItems,
+    ModalityDataParser,
+    MultiModalDataItems,
+    MultiModalDataParser,
+    ProcessorBatchItems,
+)
 from vllm.multimodal.processing import (
     BaseProcessingInfo,
     EncDecMultiModalProcessor,
@@ -62,6 +69,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.collection_utils import is_list_of
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from .utils import AutoWeightsLoader, WeightsMapper, cast_overflow_tensors, maybe_prefix
@@ -339,7 +347,7 @@ class BartCrossAttention(nn.Module):
             prefix=f"{prefix}.q_proj",
         )
 
-        # KV_proj for projecting encoder hidden states with no overhead of 
+        # KV_proj for projecting encoder hidden states with no overhead of
         # unused Q_proj by setting total_num_heads to 0
         self.kv_proj = QKVParallelLinear(
             hidden_size=embed_dim,
@@ -657,7 +665,12 @@ class BartEncoder(nn.Module):
 
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states=hidden_states)
-        print("BART ENCODER LAST HIDDEN STATES", hidden_states.mean(), hidden_states.std(), "\n")
+        print(
+            "BART ENCODER LAST HIDDEN STATES",
+            hidden_states.mean(),
+            hidden_states.std(),
+            "\n",
+        )
         return hidden_states
 
 
@@ -752,9 +765,14 @@ class BartDecoder(nn.Module):
                 decoder_hidden_states=hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
             )
-        print("BART DECODER LAST HIDDEN STATES", hidden_states.mean(), hidden_states.std(), "\n")
+        print(
+            "BART DECODER LAST HIDDEN STATES",
+            hidden_states.mean(),
+            hidden_states.std(),
+            "\n",
+        )
         return hidden_states
-    
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -856,7 +874,7 @@ class BartModel(nn.Module, SupportsQuant):
             else:
                 for param_name, weight_name, shard_id in stacked_params_mapping:
                     if weight_name not in name or "encoder_attn" in name:
-                        # Also skip q_proj in cross_attn which 
+                        # Also skip q_proj in cross_attn which
                         # can be loaded normally
                         continue
                     name = name.replace(weight_name, param_name)
@@ -870,7 +888,6 @@ class BartModel(nn.Module, SupportsQuant):
                 else:
                     if name in model_params_dict:
                         other_weights.append((name, loaded_weight))
-
 
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(other_weights)
@@ -925,6 +942,49 @@ class BartDummyInputsBuilder(BaseDummyInputsBuilder[BartProcessingInfo]):
         return {"text": dummy_text}
 
 
+# Allow "Text" as a Multimodal Modality for BART.
+class TextProcessorItems(ProcessorBatchItems[str]):
+    """
+    Data items for text modality (BART encoder input is text).
+    """
+
+    def __init__(self, data) -> None:
+        if data is None:
+            data = [""]
+        elif isinstance(data, str):
+            data = [data]
+        super().__init__(data, "text")
+
+
+class TextDataParser(MultiModalDataParser):
+    def __init__(self):
+        super().__init__()
+
+    def _parse_text_data(
+        self,
+        data: ModalityData[str],
+    ) -> ModalityDataItems[Any, Any] | None:
+        """Parse text data for BART."""
+        if data is None:
+            return TextProcessorItems(None)
+
+        if self._is_empty(data):
+            return None
+
+        # Text data should be a string or list of strings
+        if isinstance(data, str) or is_list_of(data, str):
+            return TextProcessorItems(data)
+        else:
+            raise TypeError(
+                f"Text data must be a string or list of strings, got {type(data)}"
+            )
+
+    def _get_subparsers(self) -> Mapping[str, ModalityDataParser]:
+        return {
+            "text": self._parse_text_data,
+        }
+
+
 class BartMultiModalProcessor(EncDecMultiModalProcessor[BartProcessingInfo]):
     """Multimodal processor for BART encoder-decoder models."""
 
@@ -940,7 +1000,7 @@ class BartMultiModalProcessor(EncDecMultiModalProcessor[BartProcessingInfo]):
             prompt,
             add_special_tokens=False,
             return_tensors="pt",
-        )['input_ids'].flatten()
+        )["input_ids"].flatten()
         return tokens.tolist()
 
     def create_decoder_prompt(
@@ -1035,6 +1095,9 @@ class BartMultiModalProcessor(EncDecMultiModalProcessor[BartProcessingInfo]):
                 replacement=[0] * num_tokens,
             )
         ]
+
+    def _get_data_parser(self) -> MultiModalDataParser:
+        return TextDataParser()
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -1183,12 +1246,16 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
         if encoder_outputs is not None:
             # Assume same shape for all encoder outputs
             encoder_outputs = torch.cat(encoder_outputs, dim=0)
-            print("BART FORWARD CALLED WITH encoder_outputs:", encoder_outputs.shape, "\n")
+            print(
+                "BART FORWARD CALLED WITH encoder_outputs:", encoder_outputs.shape, "\n"
+            )
         else:
             print("BART FORWARD CALLED WITH encoder_outputs: None", "\n")
 
         print("BART FWD INPUT IDS", input_ids)
-        return self.model(input_ids, positions, inputs_embeds, encoder_outputs=encoder_outputs)
+        return self.model(
+            input_ids, positions, inputs_embeds, encoder_outputs=encoder_outputs
+        )
 
     def compute_logits(
         self,
