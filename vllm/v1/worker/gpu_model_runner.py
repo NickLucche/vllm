@@ -3396,17 +3396,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 input_ids = self.input_ids.gpu[:num_tokens_after_padding]
                 inputs_embeds = None
 
-            # Add encoder inputs for text-only encoder-decoder models
-            if self.model_config.is_encoder_decoder and not self.supports_mm_inputs:
-                # TODO This is not the correct encoder input
-                # FIXME check whether we can get rid of this
-                model_kwargs.update(
-                    {
-                        "encoder_input_ids": self.input_ids.gpu[:num_tokens],
-                        "encoder_positions": self.positions.gpu[:num_tokens],
-                    }
-                )
-
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_after_padding]
             else:
