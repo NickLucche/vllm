@@ -11,12 +11,12 @@ llm = vllm.LLM(
     model=model_name,
     tensor_parallel_size=1,
     enforce_eager=True,
-    max_model_len=1024,
-    max_num_seqs=1,
-    max_num_batched_tokens=1024,
+    # max_model_len=1024,
+    max_num_seqs=4,
+    max_num_batched_tokens=11024,
     gpu_memory_utilization=0.5,
     dtype="float16",
-    disable_chunked_mm_input=True,
+    # disable_chunked_mm_input=True,
 )
 
 #   hf_overrides={"architectures": ["MBartForConditionalGeneration"]}
@@ -36,23 +36,45 @@ params = vllm.SamplingParams(temperature=0.0, max_tokens=20)
 # FIXME working with explicit encoder/decoder prompt only!
 outputs = llm.generate(
     [
+        # Not supported
         # {
         #     "prompt": "The president of the United States is",
         # },
-        {  # Test explicit encoder/decoder prompt
-        # <s> for empty prompt
+        # Not supported without changes to vllm core
+        # {  # Test explicit encoder/decoder prompt
+        #     "encoder_prompt": {
+        #         "prompt": "The president of the United States is",
+        #     },
+        #     "decoder_prompt": "<s>Donald",
+        # },
+        {  # Explicit encoder/decoder prompt
+        # # <s> to start decoder prompt
             "encoder_prompt": {
-                "prompt": "The president of the United States is",
+                "prompt": "",
+                # NOTE This format is needed st we don't have to add custom encoder-only prompt 
+                # logic in preprocess.py to convert encoder_token_ids to mm text item
+                "multi_modal_data": {
+                    "text": "The president of the United States is",
+                },
             },
             "decoder_prompt": "<s>Donald",
         },
         { 
-        # <s> for empty prompt
             "encoder_prompt": {
-                "prompt": "<s>",
+                "prompt": "",
+                "multi_modal_data": {
+                    "text": "<s>",
+                },
             },
             "decoder_prompt": "<s>Ronald McDonald is",
         },
+        # { 
+        # # <s> for empty prompt
+        #     "encoder_prompt": {
+        #         "prompt": "<s>",
+        #     },
+        #     "decoder_prompt": "<s>Ronald McDonald is",
+        # },
     ],
     sampling_params=params,
 )
