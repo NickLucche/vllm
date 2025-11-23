@@ -25,16 +25,6 @@ from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheSpec
 
 logger = init_logger(__name__)
 
-
-def _get_max_encoder_len(vllm_config: "VllmConfig") -> int:
-    """Gets the max number of encoder input tokens from the config."""
-    sc = vllm_config.scheduler_config
-    assert sc and isinstance(sc.max_num_encoder_input_tokens, int), (
-        "max_num_encoder_input_tokens must be int for enc-dec models"
-    )
-    return sc.max_num_encoder_input_tokens
-
-
 def _get_cross_slot_mapping(
     encoder_seq_lens: np.ndarray,
     block_table_tensor: torch.Tensor,
@@ -94,21 +84,38 @@ def create_cross_attention_backend(
         ) -> AttentionMetadata:
             new_metadata = copy(common_attn_metadata)
             new_metadata.causal = False
-            max_encoder_len = _get_max_encoder_len(self.vllm_config)
-            new_metadata.max_seq_len = max_encoder_len
 
-            new_metadata.seq_lens = torch.full(
-                (new_metadata.num_reqs,),
-                max_encoder_len,
-                dtype=torch.int32,
-                device=self.device,
-            )
-            new_metadata.seq_lens_cpu = torch.full(
-                (new_metadata.num_reqs,),
-                max_encoder_len,
-                dtype=torch.int32,
-                device="cpu",
-            )
+            max_encoder_len = int(new_metadata.encoder_seq_lens.max().item())
+            new_metadata.max_seq_len = max_encoder_len
+            # FIXME improve comments
+            # Any computed tokens indicated decode (no chunked prefill) 
+            num_decodes = (common_attn_metadata.num_computed_tokens_cpu>0).sum().item()
+            print("NUM COMPUTED TOKENS", common_attn_metadata.num_computed_tokens_cpu, "\n")
+            print("ENC LENS FROM COMMON ATTN METADATA", new_metadata.encoder_seq_lens, "\n\n")
+            if num_decodes > 0:
+                num_tokens = common_attn_metadata.num_computed_tokens_cpu.numpy()
+                new_metadata.encoder_seq_lens = np.where(num_tokens > 0, 0, new_metadata.encoder_seq_lens)
+            print("SEQ LENS FROM COMMON ATTN METADATA AFTER", new_metadata.encoder_seq_lens, "\n\n")
+            print("MAX ENCODER LENGTH", max_encoder_len, "\n")
+
+            # seq_lens is provided by model runner as an int32 numpy array and here in 
+            # CrossAttn is used to know how many tokens to attend to -cached on first
+            # decoder step, read on following ones.
+            # NOTE use original encoder_seq_lens to know how many tokens to read formfrom cache!
+            new_metadata.seq_lens = torch.from_numpy(common_attn_metadata.encoder_seq_lens).to(device=self.device, dtype=torch.int32)
+            new_metadata.seq_lens_cpu = torch.from_numpy(common_attn_metadata.encoder_seq_lens)
+            # new_metadata.seq_lens = torch.full(
+            #     (new_metadata.num_reqs,),
+            #     max_encoder_len,
+            #     dtype=torch.int32,
+            #     device=self.device,
+            # )
+            # new_metadata.seq_lens_cpu = torch.full(
+            #     (new_metadata.num_reqs,),
+            #     max_encoder_len,
+            #     dtype=torch.int32,
+            #     device="cpu",
+            # )
             new_metadata.slot_mapping = _get_cross_slot_mapping(
                 new_metadata.encoder_seq_lens,
                 new_metadata.block_table_tensor,
