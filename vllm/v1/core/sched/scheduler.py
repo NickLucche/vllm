@@ -1458,8 +1458,14 @@ class Scheduler(SchedulerInterface):
             # FIXME group with env var changes
             # (block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)
             block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
-            num_computed_tokens = sum(len(group) for group in block_ids) * self.block_size
+            # FIXME Same thing here, these are blocks across layers now!!
+            print("SCHEDULER block_ids", block_ids,"\n", flush=True)
+            # Get number of blocks on full attention layer, we can retrieve at most 
+            # this many tokens
+            num_computed_tokens = max(len(group) for group in block_ids) * self.block_size
             # Handle the case where num request tokens less than one block.
+            print("SCHEDULER request.num_tokens", request.num_tokens,"\n", flush=True)
+            # FIXME I don't understand why we do this and not just req.num_tokens
             num_computed_tokens = min(num_computed_tokens, request.num_tokens)
             if num_computed_tokens == request.num_tokens:
                 num_computed_tokens -= 1
