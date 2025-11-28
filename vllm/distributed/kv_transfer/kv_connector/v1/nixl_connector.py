@@ -165,7 +165,7 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         kv_cache_config: Optional["KVCacheConfig"] = None,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
-        print("NixlConnector init",kv_cache_config.kv_cache_groups,"\n", flush=True)
+        print("NixlConnector init", kv_cache_config.kv_cache_groups, "\n", flush=True)
 
         # USe config to figure out which layers have less blocks
         assert vllm_config.kv_transfer_config is not None
@@ -179,7 +179,9 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker: NixlConnectorWorker | None = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
-            self.connector_worker = NixlConnectorWorker(vllm_config, self.engine_id, kv_cache_config)
+            self.connector_worker = NixlConnectorWorker(
+                vllm_config, self.engine_id, kv_cache_config
+            )
 
     ############################################################
     # Class Methods
@@ -243,7 +245,10 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        print(f"request_finished_all_groups: {request.request_id}, {block_ids}", flush=True)
+        print(
+            f"request_finished_all_groups: {request.request_id}, {block_ids}",
+            flush=True,
+        )
         return self.connector_scheduler.request_finished(request, block_ids)
 
     def set_xfer_handshake_metadata(
@@ -512,7 +517,7 @@ class NixlConnectorScheduler:
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-    # TODO ALREADY OK WITH HMA BUT ITS  SYNC ONLY SO NOT FOR US
+        # TODO ALREADY OK WITH HMA BUT ITS  SYNC ONLY SO NOT FOR US
         params = request.kv_transfer_params
         print("update_state_after_alloc", params, "\n\n", flush=True)
         logger.debug(
@@ -554,13 +559,16 @@ class NixlConnectorScheduler:
                     # blocks that do not yet have a hash hence they're not full..? ok yeah
                     # these are the blocks that must be pulled (partial prefix cache hit)
                     # TODO sync with Chen on how prefix cache work with HMA
-                    # FIXME I dont think you need blocks acrosss layers here!
+                    # FIXME remote <> local len blocks mismatch
                     local_block_ids = (
                         blocks.get_unhashed_block_ids_all_groups()
                         if num_external_tokens > 0
                         else []
                     )
-                    print(f"update_state_after_alloc local_block_ids unhashed: {local_block_ids}\n", flush=True)
+                    print(
+                        f"update_state_after_alloc local_block_ids unhashed: {local_block_ids}\n",
+                        flush=True,
+                    )
                     # ok so if num_external_tokens==0, we just record the request here but dont actually
                     # read from worker, just send_notif
                     # Get unhashed blocks to pull from remote.
@@ -618,7 +626,7 @@ class NixlConnectorScheduler:
         self._reqs_not_processed = set()
         self._reqs_need_send = {}
         if len(meta.reqs_to_recv) > 0:
-            print("build_connector_meta", meta.reqs_to_recv,"\n", flush=True)
+            print("build_connector_meta", meta.reqs_to_recv, "\n", flush=True)
 
         return meta
 
@@ -719,6 +727,7 @@ class NixlConnectorWorker:
             kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                 num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
             )
+            print("kv_cache_shape", kv_cache_shape, "\n", flush=True)
             # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
             # we just mock num_blocks to 1 for the dimension check below.
             self._is_kv_layout_blocks_first = (
@@ -820,7 +829,12 @@ class NixlConnectorWorker:
             remote_tp_size = self.remote_tp_size[remote_engine_id]
             return self.get_target_remote_rank(remote_tp_size)
 
-    def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: Optional["KVCacheConfig"] = None):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        engine_id: str,
+        kv_cache_config: Optional["KVCacheConfig"] = None,
+    ):
         if NixlWrapper is None:
             logger.error("NIXL is not available")
             raise RuntimeError("NIXL is not available")
@@ -831,13 +845,6 @@ class NixlConnectorWorker:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.kv_cache_config = kv_cache_config
-        if kv_cache_config is not None:
-            self._kv_cache_layer_to_group = {layer: group_id for group_id, group in enumerate(kv_cache_config.kv_cache_groups) for layer in group.layer_names}
-            # self._kv_cache_group_to_num_layers_cum = {}
-            # num_layers_cum = 0
-            # for group_id in range(len(kv_cache_config.kv_cache_groups)):
-            #     self._kv_cache_group_to_num_layers_cum[group_id] = 
-            print(self._kv_cache_layer_to_group,"\n", flush=True)
 
         if vllm_config.kv_transfer_config is None:
             raise ValueError("kv_transfer_config must be set for NixlConnector")
@@ -1219,25 +1226,30 @@ class NixlConnectorWorker:
         self.block_len_per_layer = list[int]()
         self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
         self.device_id = self.tp_rank
-        kv_cache_group_to_region_idxs = defaultdict(list)
-        region_id = 0
+        print("SPLIT K AND V", split_k_and_v, "\n", flush=True)
         for layer_name, cache_or_caches in xfer_buffers.items():
-            # These are actually already ~grouped at this point (2384263) 
-            # model.layers.0.self_attn.attn, model.layers.2.self_attn.attn, 
+            # These are actually already ~grouped at this point (2384263)
+            # model.layers.0.self_attn.attn, model.layers.2.self_attn.attn,
             # model.layers.4.self_attn.attn, model.layers.6.self_attn.attn..)
             # print(layer_name,"\n", flush=True)
             cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
 
             for cache in cache_list:
-                print("layer_name", layer_name, cache.shape,"\n", flush=True)
-                if self.kv_cache_config is not None:
-                    group_idx = self._kv_cache_layer_to_group[layer_name]
-                    kv_cache_group_to_region_idxs[group_idx].append(region_id)
-                    region_id += 1
+                print("layer_name", layer_name, cache.shape, "\n", flush=True)
                 base_addr = cache.data_ptr()
                 if not self.use_host_buffer and current_platform.is_cuda_alike():
                     self.device_id = cache.device.index
                 if base_addr in seen_base_addresses:
+                    # NOTE (NickLucche) HMA employs memory pooling to share tensors
+                    # across groups. This results in skipping all tensors but the ones
+                    # pointed to by group0. Also, generally we will have more blocks
+                    # per tensor but fewer regions.
+                    print(
+                        "base_addr already in seen_base_addresses",
+                        layer_name,
+                        "\n",
+                        flush=True,
+                    )
                     continue
 
                 kernel_block_size = cache.shape[block_size_position]
@@ -1261,7 +1273,7 @@ class NixlConnectorWorker:
                 if tensor_size_bytes is None:
                     tensor_size_bytes = curr_tensor_size_bytes
                     self.num_blocks = cache.shape[0]
-                    print("NUM OF BLOCKS", self.num_blocks,"\n", flush=True)
+                    print("NUM OF BLOCKS", self.num_blocks, "\n", flush=True)
 
                 assert cache.shape[0] == self.num_blocks, (
                     "All kv cache tensors must have the same number of blocks"
@@ -1286,7 +1298,6 @@ class NixlConnectorWorker:
                 caches_data.append(
                     (base_addr, curr_tensor_size_bytes, self.device_id, "")
                 )
-        self._kv_cache_group_to_region_idxs = {k:np.array(v)[:, None] for k,v in kv_cache_group_to_region_idxs.items()}
         logger.debug(
             "Different block lengths collected: %s", set(self.block_len_per_layer)
         )
@@ -1377,9 +1388,24 @@ class NixlConnectorWorker:
         data copy correctness.
         """
         block_size_ratio = self.block_size // block_size
-        print("block_size_ratio", block_size_ratio, block_size, self.block_size,"\n", flush=True)
+        print(
+            "register_local_xfer_handler block_size_ratio",
+            block_size_ratio,
+            block_size,
+            self.block_size,
+            "\n",
+            flush=True,
+        )
         assert block_size_ratio == 1
         blocks_data = []
+        print(
+            "seen_base_addresses/num_blocks",
+            len(self.seen_base_addresses),
+            self.num_blocks * block_size_ratio,
+            "\n",
+            flush=True,
+        )
+        print("kv topo", self.kv_topo.is_kv_layout_blocks_first, "\n", flush=True)
         for i, base_addr in enumerate(self.seen_base_addresses):
             # The new block_len is using prefill block_len;
             # and num_blocks is multiple with N
@@ -1413,8 +1439,12 @@ class NixlConnectorWorker:
         )
 
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
-        # FIXME theres some issue with num_blocks: profiling log reports 1361 (174,208 tokens), but cache.shape returns 2722 blocks (2X!)
-        print("register_local_xfer_handler NUM OF descs", len(blocks_data),"\n", flush=True)
+        print(
+            "register_local_xfer_handler NUM OF descs",
+            len(blocks_data),
+            "\n",
+            flush=True,
+        )
         # NIXL_INIT_AGENT to be used for preparations of local descs.
         return self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs)
 
@@ -1977,7 +2007,13 @@ class NixlConnectorWorker:
             meta.remote_engine_id,
             req_id,
         )
-        print("read_blocks_for_req", meta.local_physical_block_ids, meta.remote_block_ids,"\n", flush=True)
+        print(
+            "read_blocks_for_req",
+            meta.local_physical_block_ids,
+            meta.remote_block_ids,
+            "\n",
+            flush=True,
+        )
         self._read_blocks(
             request_id=req_id,
             dst_engine_id=meta.remote_engine_id,
@@ -2193,35 +2229,29 @@ class NixlConnectorWorker:
                 # Otherwise, we assume we have MLA and select i-th layer
                 assert self.num_layers == self.num_regions
                 region_ids = np.arange(layer_idx, layer_idx + 1)
-
-        print("get_block_descs_ids", block_ids,"\n", flush=True)
+        # NOTE (NickLucche) With HMA, every kv group has the same number of layers and
+        # layers from different groups share the same kv tensor.
+        # eg block_ids=[[1, 2], [3]]->blocks [1, 2] need to be read across all regions,
+        # same for [3], but group0-group1 blocks will always differ (different areas).
+        # Therefore we can just flatten the block_ids and compute the descs ids for all
+        # groups at once.
+        print("get_block_descs_ids", block_ids, "\n", flush=True)
         num_blocks = self.dst_num_blocks[engine_id]
         if block_size_ratio is not None:
             num_blocks = int(num_blocks * block_size_ratio)
-        
-        # FIXME refactor and optimize this
-        if self._kv_cache_group_to_region_idxs:
-            # Same number of kv groups
-            assert len(self._kv_cache_group_to_region_idxs) == len(block_ids)
-            descs_ids = []
-            for group_idx in range(len(block_ids)):
-                group_regions = self._kv_cache_group_to_region_idxs[group_idx]
-                group_block_ids = block_ids[group_idx]
-                group_block_ids = np.array(group_block_ids)[None, :]
-                print("get_block_descs_ids group_regions", group_regions, "num_blocks", num_blocks, "group_block_ids", group_block_ids, "\n", flush=True)
-                group_descs_ids = group_regions * num_blocks + group_block_ids
-                descs_ids.append(group_descs_ids.flatten())
-            print("get_block_descs_ids output", np.concatenate(descs_ids), np.concatenate(descs_ids).shape, np.concatenate(descs_ids).flatten().shape, "\n\n", flush=True)
-            return np.concatenate(descs_ids).flatten()
 
         # Compute the desc ids for each block.
         region_ids = region_ids[:, None]
-        block_ids = np.array(block_ids)[None, :]
+        block_ids = np.concatenate(block_ids)[None, :]
         descs_ids = region_ids * num_blocks + block_ids
-        print("get_block_descs_ids output", descs_ids,"\n", flush=True)
+        print(
+            "get_block_descs_ids num output", len(descs_ids.flatten()), "\n", flush=True
+        )
         return descs_ids.flatten()
 
-    def _logical_to_kernel_block_ids(self, block_ids: tuple[list[int], ...]) -> tuple[list[int], ...]:
+    def _logical_to_kernel_block_ids(
+        self, block_ids: tuple[list[int], ...]
+    ) -> tuple[list[int], ...]:
         """
         Convert logical block ids to kernel physical block ids.
         This is required when the logical block size (the one set by the user)
