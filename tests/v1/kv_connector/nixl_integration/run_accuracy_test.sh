@@ -147,8 +147,8 @@ run_tests_for_model() {
     --block-size ${PREFILL_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
-    --kv-transfer-config '$KV_CONFIG'" \
-    $EXTRA_ARGS
+    --kv-transfer-config '$KV_CONFIG' \
+    $EXTRA_ARGS"
 
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"
@@ -189,8 +189,8 @@ run_tests_for_model() {
     --enforce-eager \
     --block-size ${DECODE_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
-    --kv-transfer-config '$KV_CONFIG'" \
-    $EXTRA_ARGS
+    --kv-transfer-config '$KV_CONFIG' \
+    $EXTRA_ARGS"
   
   # DP-EP attention mode
   if [[ -z "$DP_EP" ]]; then

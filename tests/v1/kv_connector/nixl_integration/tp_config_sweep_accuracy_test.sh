@@ -18,7 +18,7 @@ standard_configs=(
 
 wide_ep_configs=(
   # MLA+P-TP1, D-DPEP=2 (TP=1) 
-  "DP_EP=1 GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 EXTRA_ARGS='--max-model-len 8192 --max-num-seqs 8' MODEL_NAMES=RedHatAI/DeepSeek-V2.5-1210-FP8"
+  "DP_EP=1 GPU_MEMORY_UTILIZATION=0.9 PREFILLER_TP_SIZE=4 DECODER_TP_SIZE=4 EXTRA_ARGS=\"--max-model-len 8192 --max-num-seqs 8\" MODEL_NAMES=RedHatAI/DeepSeek-V2.5-1210-FP8"
 )
 
 # Select configs based on argument
@@ -49,8 +49,8 @@ run_tests() {
   echo "=== Running tests (${label}) ==="
   for cfg in "${configs[@]}"; do
     echo "-> Running with ${cfg} ${extra_env:+and ${extra_env}}"
-    # Use 'env' to safely set variables without eval
-    if ! env ${extra_env} ${cfg} bash "${SCRIPT}"; then
+    # Use eval to properly handle quoted variables
+    if ! eval "${extra_env} ${cfg} bash '${SCRIPT}'"; then
       echo "❌ Test failed for config: ${cfg} ${extra_env:+(${extra_env})}"
       exit 1
     fi
