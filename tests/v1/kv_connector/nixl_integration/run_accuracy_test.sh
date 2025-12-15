@@ -51,6 +51,7 @@ DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.2}
 PREFILL_BLOCK_SIZE=${PREFILL_BLOCK_SIZE:-128}
 DECODE_BLOCK_SIZE=${DECODE_BLOCK_SIZE:-128}
+EXTRA_ARGS=${EXTRA_ARGS:-""}
 
 # Find the git repository root directory
 GIT_ROOT=$(git rev-parse --show-toplevel)
@@ -146,7 +147,8 @@ run_tests_for_model() {
     --block-size ${PREFILL_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
-    --kv-transfer-config '$KV_CONFIG'"
+    --kv-transfer-config '$KV_CONFIG'" \
+    $EXTRA_ARGS
 
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"
@@ -187,7 +189,8 @@ run_tests_for_model() {
     --enforce-eager \
     --block-size ${DECODE_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
-    --kv-transfer-config '$KV_CONFIG'"
+    --kv-transfer-config '$KV_CONFIG'" \
+    $EXTRA_ARGS
   
   # DP-EP attention mode
   if [[ -z "$DP_EP" ]]; then

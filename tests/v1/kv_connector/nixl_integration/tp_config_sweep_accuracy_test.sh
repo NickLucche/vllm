@@ -2,16 +2,45 @@
 set -euo pipefail
 
 # Utility to run integration tests sequentially with varying TP configurations.
+# Usage: ./tp_config_sweep_accuracy_test.sh [standard|wide-ep|all]
+#   standard  - Run PD TP test cases (default)
+#   wide-ep   - Run wide EP test cases
+#   all       - Run all test cases
 SCRIPT="v1/kv_connector/nixl_integration/run_accuracy_test.sh"
 
 # Define test configurations
-configs=(
+standard_configs=(
   "GPU_MEMORY_UTILIZATION=0.6 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2"
   "GPU_MEMORY_UTILIZATION=0.6 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2"
   "GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # MLA case
   "GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny"
-  "DP_EP=1 GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # MLA+P-TP1, D-DPEP=2 (TP=1) 
 )
+
+wide_ep_configs=(
+  # MLA+P-TP1, D-DPEP=2 (TP=1) 
+  "DP_EP=1 GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 EXTRA_ARGS='--max-model-len 8192 --max-num-seqs 8' MODEL_NAMES=RedHatAI/DeepSeek-V2.5-1210-FP8"
+)
+
+# Select configs based on argument
+TEST_MODE="${1:-standard}"
+case "$TEST_MODE" in
+  standard)
+    configs=("${standard_configs[@]}")
+    ;;
+  wide-ep)
+    configs=("${wide_ep_configs[@]}")
+    ;;
+  all)
+    configs=("${standard_configs[@]}" "${wide_ep_configs[@]}")
+    ;;
+  *)
+    echo "Unknown test mode: $TEST_MODE"
+    echo "Usage: $0 [standard|wide-ep|all]"
+    exit 1
+    ;;
+esac
+
+echo "Running tests in '$TEST_MODE' mode (${#configs[@]} configs)"
 
 run_tests() {
   local label=$1
