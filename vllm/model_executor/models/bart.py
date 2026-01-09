@@ -29,8 +29,7 @@ from transformers import BartConfig
 from transformers.utils import logging
 
 from vllm.attention import Attention, AttentionType
-from vllm.config import CacheConfig, VllmConfig
-from vllm.config.lora import LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -896,6 +895,7 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
         )
         loaded_params = loader.load_weights(weights_tuple_list,
                                             mapper=self.hf_to_vllm_mapper)
+
         if shared_embedding_weight is not None:
             weight_loader = getattr(self.lm_head.weight, "weight_loader",
                                     default_weight_loader)
