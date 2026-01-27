@@ -86,6 +86,10 @@ def compute_varlen_chunk_metadata(
 
 class Mamba2AttentionBackend(AttentionBackend):
     @staticmethod
+    def get_name() -> str:
+        return "mamba2"
+
+    @staticmethod
     def get_builder_cls() -> type["Mamba2AttentionMetadataBuilder"]:
         return Mamba2AttentionMetadataBuilder
 

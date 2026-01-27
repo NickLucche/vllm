@@ -308,7 +308,7 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         backend = get_current_attn_backend(self._vllm_config)
-        if backend().get_name() not in (
+        if backend.get_name() not in (
             "FLASH_ATTN",
             "FLASHINFER",
         ):
@@ -326,12 +326,13 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, role, kv_cache_config)
+        print(f"{kv_cache_config=}\n\n")
 
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
-        for group in kv_cache_config.kv_cache_groups:
-            if isinstance(group.kv_cache_spec, MambaSpec):
-                raise ValueError("NixlConnector does not support Mamba models.")
+        # for group in kv_cache_config.kv_cache_groups:
+            # if isinstance(group.kv_cache_spec, MambaSpec):
+                # raise ValueError("NixlConnector does not support Mamba models.")
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
         self.kv_transfer_config = vllm_config.kv_transfer_config
 
@@ -1360,7 +1361,10 @@ class NixlConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
-
+        print(f"{self.vllm_config.cache_config.mamba_page_size_padded=}\n\n")
+        vs = next(iter(kv_caches.values()))
+        # len(vs)=2, [torch.Size([18525, 3, 3328]), torch.Size([18525, 48, 64, 128])]
+        print(f"{next(iter(kv_caches.keys()))}:{len(vs)=}, {[v.shape for v in vs]}\n\n")
         self.kv_topo = TpKVTopology(
             tp_rank=self.tp_rank,
             engine_id=self.engine_id,
@@ -1369,7 +1373,7 @@ class NixlConnectorWorker:
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backend=self.attn_backend,
-            tensor_shape=next(iter(kv_caches.values())).shape,
+            # tensor_shape=next(iter(kv_caches.values())).shape,
         )
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config, self.backend_name, self.kv_topo.cross_layers_blocks
@@ -1414,12 +1418,20 @@ class NixlConnectorWorker:
         # Enable different block lengths for different layers when MLA is used.
         self.block_len_per_layer = list[int]()
         self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
+        print(f"{self.kv_topo.split_k_and_v=}\n\n")
+
         for layer_name, cache_or_caches in xfer_buffers.items():
+            # Ok I see, for FA we shouldnt split..or I think actually this is fine UNLESS is_kv_layout_blocks_first (flashinfer)
+            # layer_name='model.layers.5.self_attn.attn', [torch.Size([18525, 400, 4, 128]), torch.Size([18525, 400, 4, 128])]
+            print(f"{layer_name=}, {[v.shape for v in cache_or_caches]}")
             cache_list = (
                 cache_or_caches if self.kv_topo.split_k_and_v else [cache_or_caches]
             )
             for cache in cache_list:
                 base_addr = cache.data_ptr()
+                # SS+Conv actually share the same tensor but with different offseted views, so base addr is 
+                # different. This shouldnt matter for our purposes I think, just registering regions with different
+                # sizes
                 if base_addr in seen_base_addresses:
                     # NOTE (NickLucche) HMA employs memory pooling to share tensors
                     # across groups. This results in skipping all tensors but the ones
@@ -1427,22 +1439,29 @@ class NixlConnectorWorker:
                     # per tensor but fewer regions.
                     continue
 
-                kernel_block_size = cache.shape[self.kv_topo.block_size_position]
-                if self.block_size != kernel_block_size:
-                    logger.info_once(
-                        "User-specified logical block size (%s) does not match"
-                        " physical kernel block size (%s). Using the latter. ",
-                        self.block_size,
-                        kernel_block_size,
-                    )
-                    self._physical_blocks_per_logical_kv_block = (
-                        self.block_size // kernel_block_size
-                    )
-                    self.block_size = kernel_block_size
-                    self._block_size[self.engine_id] = kernel_block_size
+                # kernel_block_size = cache.shape[self.kv_topo.block_size_position]
+                # if self.block_size != kernel_block_size:
+                #     logger.info_once(
+                #         "User-specified logical block size (%s) does not match"
+                #         " physical kernel block size (%s). Using the latter. ",
+                #         self.block_size,
+                #         kernel_block_size,
+                #     )
+                #     self._physical_blocks_per_logical_kv_block = (
+                #         self.block_size // kernel_block_size
+                #     )
+                #     self.block_size = kernel_block_size
+                #     self._block_size[self.engine_id] = kernel_block_size
 
                 seen_base_addresses.append(base_addr)
-                curr_tensor_size_bytes = cache.numel() * cache.element_size()
+                # curr_tensor_size_bytes = cache.numel() * cache.element_size()
+                # For the actual storage size (including padding), numel() is logical not physical
+                # TODO better: get page_size_bytes from
+                # kv_cache_spec = self.kv_cache_config.kv_cache_groups[group_idx].kv_cache_spec
+                # curr_block_size_bytes = kv_cache_spec.page_size_bytes
+
+                # curr_tensor_size_bytes = curr_block_size_bytes * num_blocks
+                curr_tensor_size_bytes = cache.untyped_storage().nbytes()
 
                 if tensor_size_bytes is None:
                     tensor_size_bytes = curr_tensor_size_bytes
@@ -1451,15 +1470,29 @@ class NixlConnectorWorker:
                 assert cache.shape[0] == self.num_blocks, (
                     "All kv cache tensors must have the same number of blocks"
                 )
-
+                # [(2,)NHD] FA, [conv*ssm] for mamba ==> conv*ssm == NHD as num_blocks is the same I assume
                 self.block_len_per_layer.append(
                     curr_tensor_size_bytes // self.num_blocks
                 )
+                # HD for FA, conv*ssm for SSM assuming block_size == 1
                 self.slot_size_per_layer.append(
                     self.block_len_per_layer[-1] // self.block_size
                 )
+                # NOTE THESE ARE DIFFERENT! CONV/SSM CASES
+                # torch.Size([18525, 3, 3328]), torch.Size([18525, 48, 64, 128])
+                # tensor_size_bytes=369907200, curr_tensor_size_bytes=14568652800
+                # then FA layer comes in, torch.Size([18525, 400, 4, 128])
+                # tensor_size_bytes=369907200, curr_tensor_size_bytes=7587840000
+                # NOTE ideally (conv+ssm)/fa = 2 (so equal to K+V)..
+                # OK all is well with padded sizes
+                # layer_name='model.layers.30.mixer', [torch.Size([18525, 3, 3328]), torch.Size([18525, 48, 64, 128])]
+                # tensor_size_bytes=15175680000, curr_tensor_size_bytes=15175680000
+                # layer_name='model.layers.5.self_attn.attn', [torch.Size([18525, 400, 4, 128]), torch.Size([18525, 400, 4, 128])]
+                # tensor_size_bytes=15175680000, curr_tensor_size_bytes=15175680000
 
+                print(f"{tensor_size_bytes=}, {curr_tensor_size_bytes=}\n\n")
                 if not self.use_mla:
+                    # This is ok with mamba too
                     # Different kv cache shape is not supported by HeteroTP
                     assert tensor_size_bytes == curr_tensor_size_bytes, (
                         "All kv cache tensors must have the same size"
@@ -1471,7 +1504,7 @@ class NixlConnectorWorker:
                     (base_addr, curr_tensor_size_bytes, self.device_id, "")
                 )
 
-        logger.debug(
+        logger.info(
             "Different block lengths collected: %s", set(self.block_len_per_layer)
         )
         assert len(self.block_len_per_layer) == len(seen_base_addresses)
@@ -1490,6 +1523,7 @@ class NixlConnectorWorker:
         self.device_kv_caches = kv_caches
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
+        print(f"{self.kv_topo.is_kv_layout_blocks_first=}\n\n")
         if self.kv_topo.is_kv_layout_blocks_first:
             for i in range(len(self.slot_size_per_layer)):
                 assert self.slot_size_per_layer[i] % 2 == 0
@@ -1736,6 +1770,7 @@ class NixlConnectorWorker:
                 if indexes_into_remote
                 else 0
             )
+            # Assume smae num_blocks for mamba and fa
             for block_id in range(nixl_agent_meta.num_blocks):
                 block_offset = block_id * nixl_agent_meta.block_lens[i]
                 # For each block, grab the heads chunk belonging to rank_i
@@ -2257,6 +2292,7 @@ class NixlConnectorWorker:
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
                 remote_rank
             ]
+            print(f"READ BLOCKS REQUEST: {req_id}, {meta.local_physical_block_ids=}, {meta.remote.block_ids=}\n\n", flush=True)
             self._read_blocks(
                 request_id=req_id,
                 dst_engine_id=meta.remote.engine_id,
@@ -2449,6 +2485,7 @@ class NixlConnectorWorker:
         When HMA is enabled number of descriptors across kv cache groups might differ.
         A single flattened array is returned for all groups anyway.
         """
+        print(f"get_block_descs_ids: {block_ids=}\n")
         region_ids = np.arange(self.num_regions)
         # NOTE (NickLucche) With HMA, every kv group has the same number of layers and
         # layers from different groups share the same kv tensor.
@@ -2464,6 +2501,7 @@ class NixlConnectorWorker:
         region_ids = region_ids[:, None]
         block_ids = np.concatenate(block_ids)[None, :]
         descs_ids = region_ids * num_blocks + block_ids
+        print(f"get_block_descs_ids output: {descs_ids=}\n\n", flush=True)
         return descs_ids.flatten()
 
     def _logical_to_kernel_block_ids(self, block_ids: BlockIds) -> BlockIds:

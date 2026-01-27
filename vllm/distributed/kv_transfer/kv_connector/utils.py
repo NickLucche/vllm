@@ -378,17 +378,19 @@ class TpKVTopology:
     def __post_init__(self):
         # Figure out whether the first dimension of the cache is K/V
         # or num_blocks. This is used to register the memory regions correctly.
-        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-            num_blocks=1, block_size=16, num_kv_heads=4, head_size=1
-        )
+        # kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+        #     num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
+        # )
         # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
         # we just mock num_blocks to 1 for the dimension check below.
-        self._is_kv_layout_blocks_first = (
-            len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
-        )
+        # self._is_kv_layout_blocks_first = (
+        #     len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
+        # )
+        self._is_kv_layout_blocks_first = True
 
         self._kv_heads_position: int | None = None
         self._cross_layers_blocks = False
+        # self._physical_block_size_position = 0
         if self.tensor_shape is not None:
             self._cross_layers_blocks = (
                 len(self.tensor_shape) == len(kv_cache_shape) + 1
@@ -420,6 +422,7 @@ class TpKVTopology:
     @property
     def split_k_and_v(self) -> bool:
         # Whether to register regions for K and V separately (when present).
+        return True
         return not (
             self._cross_layers_blocks or self.is_mla or self.is_kv_layout_blocks_first
         )
@@ -535,6 +538,14 @@ def get_current_attn_backend(vllm_config: VllmConfig):
     layers = get_layers_from_vllm_config(vllm_config, layer_type, None)
     if layers:
         backend = next(iter(layers.values())).get_attn_backend()
+        #         backend = None
+        # layers_iterator = iter(layers.values())
+        # while backend is None:
+        #     backend = next(layers_iterator).get_attn_backend()
+        #     try:
+        #         backend.get_name()
+        #     except NotImplementedError:
+        #         backend = None
     else:
         # Fallback for tests, when static_forward_context is empty.
         logger.debug(
