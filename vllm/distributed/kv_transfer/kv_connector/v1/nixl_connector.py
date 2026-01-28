@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 import contextlib
 import copy
 import logging
@@ -1422,11 +1423,18 @@ class NixlConnectorWorker:
 
         for layer_name, cache_or_caches in xfer_buffers.items():
             # Ok I see, for FA we shouldnt split..or I think actually this is fine UNLESS is_kv_layout_blocks_first (flashinfer)
+            # in that case we split only for mamba models
             # layer_name='model.layers.5.self_attn.attn', [torch.Size([18525, 400, 4, 128]), torch.Size([18525, 400, 4, 128])]
-            print(f"{layer_name=}, {[v.shape for v in cache_or_caches]}")
-            cache_list = (
-                cache_or_caches if self.kv_topo.split_k_and_v else [cache_or_caches]
-            )
+            # TODO special case to handle properly!
+            if self.vllm_config.attention_config.backend == AttentionBackendEnum.FLASHINFER:
+                cache_list = (
+                    cache_or_caches if "self_attn" not in layer_name else [cache_or_caches]
+                )
+            else:
+                cache_list = (
+                    cache_or_caches if self.kv_topo.split_k_and_v else [cache_or_caches]
+                )
+            print(f"{layer_name=}, {[v.shape for v in cache_list]}")
             for cache in cache_list:
                 base_addr = cache.data_ptr()
                 # SS+Conv actually share the same tensor but with different offseted views, so base addr is 
@@ -1512,6 +1520,8 @@ class NixlConnectorWorker:
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
+        print(f"REGIONS {caches_data=}\n")
+        print(f"{self.num_regions=}\n\n", flush=True)
         self.num_layers = len(xfer_buffers.keys())
 
         descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
@@ -1524,7 +1534,10 @@ class NixlConnectorWorker:
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
         print(f"{self.kv_topo.is_kv_layout_blocks_first=}\n\n")
-        if self.kv_topo.is_kv_layout_blocks_first:
+        # if self.kv_topo.is_kv_layout_blocks_first:
+        # TODO this is only relevant for heterogeneous TP, doubling here then halving blocks
+        # has no effect on accuracy (just on efficiency)
+        if False:
             for i in range(len(self.slot_size_per_layer)):
                 assert self.slot_size_per_layer[i] % 2 == 0
                 self.slot_size_per_layer[i] //= 2
@@ -1535,6 +1548,7 @@ class NixlConnectorWorker:
             # split on kv_heads dim as required by heterogeneous TP, one must
             # be able to index K/V separately. Hence we double the number
             # of 'virtual' regions here and halve `block_len` below.
+            # TODO does this make sense on mamba layers?
             self.num_regions *= 2
 
         # Register local/src descr for NIXL xfer.
@@ -1597,7 +1611,8 @@ class NixlConnectorWorker:
                 # (addr, len, device id)
                 blocks_data.append((addr, kv_block_len, self.device_id))
 
-            if self.kv_topo.is_kv_layout_blocks_first:
+            # if self.kv_topo.is_kv_layout_blocks_first:
+            if False:
                 # Separate and interleave K/V regions to maintain the same
                 # descs ordering. This is needed for selecting contiguous heads
                 # when split across TP ranks.
@@ -1607,8 +1622,8 @@ class NixlConnectorWorker:
                     # Register addresses for V cache (K registered first).
                     v_addr = addr + kv_block_len
                     blocks_data.append((v_addr, kv_block_len, self.device_id))
-        logger.debug(
-            "Created %s blocks for src engine %s and rank %s on device id %s",
+        logger.info(
+            "[INFO] Created %s blocks for src engine %s and rank %s on device id %s",
             len(blocks_data),
             self.engine_id,
             self.tp_rank,
@@ -1780,7 +1795,8 @@ class NixlConnectorWorker:
                 # (addr, len, device id)
                 blocks_data.append((addr, local_block_len, nixl_agent_meta.device_id))
 
-            if self.kv_topo.is_kv_layout_blocks_first:
+            # if self.kv_topo.is_kv_layout_blocks_first:
+            if False:
                 # With FlashInfer index V separately to allow head splitting.
                 for block_id in range(nixl_agent_meta.num_blocks):
                     block_offset = block_id * nixl_agent_meta.block_lens[i]
@@ -2487,6 +2503,7 @@ class NixlConnectorWorker:
         """
         print(f"get_block_descs_ids: {block_ids=}\n")
         region_ids = np.arange(self.num_regions)
+        print(f"{region_ids.shape=}\n")
         # NOTE (NickLucche) With HMA, every kv group has the same number of layers and
         # layers from different groups share the same kv tensor.
         # eg block_ids=[[1, 2], [3]]->blocks [1, 2] need to be read across all regions,
@@ -2498,8 +2515,10 @@ class NixlConnectorWorker:
             num_blocks = int(num_blocks * block_size_ratio)
 
         # Compute the desc ids for each block.
+        # For mamba we should expand mamba group blocks to all regions..?
         region_ids = region_ids[:, None]
         block_ids = np.concatenate(block_ids)[None, :]
+        print(f"{block_ids.shape=}\n")
         descs_ids = region_ids * num_blocks + block_ids
         print(f"get_block_descs_ids output: {descs_ids=}\n\n", flush=True)
         return descs_ids.flatten()
@@ -2535,7 +2554,8 @@ class NixlConnectorWorker:
         share the same region.
         """
         assert self.kv_topo is not None
-        if self.kv_topo.is_kv_layout_blocks_first:
+        # if self.kv_topo.is_kv_layout_blocks_first:
+        if False:
             # For indexing only half (either just the K or V part).
             block_len = self.block_len_per_layer[layer_idx] // 2
         else:
