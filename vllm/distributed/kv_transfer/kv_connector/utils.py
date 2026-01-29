@@ -441,7 +441,9 @@ class TpKVTopology:
 
     @property
     def block_size_position(self) -> int:
-        return self._physical_block_size_position
+        # return self._physical_block_size_position
+        # TODO cpu check, rebase 
+        return -2 if self.is_mla else -3
 
     def tp_ratio(
         self,

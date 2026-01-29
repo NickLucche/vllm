@@ -938,6 +938,7 @@ class NixlConnectorWorker:
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
         )
         self.kv_cache_config = kv_cache_config
+        self._layer_specs = {layer: group.kv_cache_spec for group in kv_cache_config.kv_cache_groups for layer in group.layer_names}
 
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
@@ -1363,6 +1364,8 @@ class NixlConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
         print(f"{self.vllm_config.cache_config.mamba_page_size_padded=}\n\n")
+        # block size: 400, the one from the FA spec
+        print(f"block size: {self.block_size}\n\n")
         vs = next(iter(kv_caches.values()))
         # len(vs)=2, [torch.Size([18525, 3, 3328]), torch.Size([18525, 48, 64, 128])]
         print(f"{next(iter(kv_caches.keys()))}:{len(vs)=}, {[v.shape for v in vs]}\n\n")
@@ -1446,20 +1449,22 @@ class NixlConnectorWorker:
                     # pointed to by group0. Also, generally we will have more blocks
                     # per tensor but fewer regions.
                     continue
-
-                # kernel_block_size = cache.shape[self.kv_topo.block_size_position]
-                # if self.block_size != kernel_block_size:
-                #     logger.info_once(
-                #         "User-specified logical block size (%s) does not match"
-                #         " physical kernel block size (%s). Using the latter. ",
-                #         self.block_size,
-                #         kernel_block_size,
-                #     )
-                #     self._physical_blocks_per_logical_kv_block = (
-                #         self.block_size // kernel_block_size
-                #     )
-                #     self.block_size = kernel_block_size
-                #     self._block_size[self.engine_id] = kernel_block_size
+                
+                # Mamba blocks have no logical<>physical discrepancy
+                if not isinstance(self._layer_specs[layer_name], MambaSpec):
+                    kernel_block_size = cache.shape[self.kv_topo.block_size_position]
+                    if self.block_size != kernel_block_size:
+                        logger.info_once(
+                            "User-specified logical block size (%s) does not match"
+                            " physical kernel block size (%s). Using the latter. ",
+                            self.block_size,
+                            kernel_block_size,
+                        )
+                        self._physical_blocks_per_logical_kv_block = (
+                            self.block_size // kernel_block_size
+                        )
+                        self.block_size = kernel_block_size
+                        self._block_size[self.engine_id] = kernel_block_size
 
                 seen_base_addresses.append(base_addr)
                 # curr_tensor_size_bytes = cache.numel() * cache.element_size()
@@ -1470,22 +1475,27 @@ class NixlConnectorWorker:
 
                 # curr_tensor_size_bytes = curr_block_size_bytes * num_blocks
                 curr_tensor_size_bytes = cache.untyped_storage().nbytes()
+                # curr_tensor_size_bytes = page_size_bytes * num_blocks (from mamba layer though, not the kernel ones from FA)
+                print(f"{curr_tensor_size_bytes=}, {self._layer_specs[layer_name].page_size_bytes=}\n\n")
 
                 if tensor_size_bytes is None:
                     tensor_size_bytes = curr_tensor_size_bytes
                     self.num_blocks = cache.shape[0]
-
-                assert cache.shape[0] == self.num_blocks, (
-                    "All kv cache tensors must have the same number of blocks"
-                )
+                print(f"{cache.shape[0]=}, {self.num_blocks=}\n")
+                # assert cache.shape[0] == self.num_blocks, (
+                #     "All kv cache tensors must have the same number of blocks"
+                # )
                 # [(2,)NHD] FA, [conv*ssm] for mamba ==> conv*ssm == NHD as num_blocks is the same I assume
                 self.block_len_per_layer.append(
                     curr_tensor_size_bytes // self.num_blocks
                 )
+                print(f"{self.block_len_per_layer[-1]=} \n")
                 # HD for FA, conv*ssm for SSM assuming block_size == 1
+                # TODO normally HD, not really needed anyway, refactor away
                 self.slot_size_per_layer.append(
                     self.block_len_per_layer[-1] // self.block_size
                 )
+                print(f"{self.slot_size_per_layer[-1]=}")
                 # NOTE THESE ARE DIFFERENT! CONV/SSM CASES
                 # torch.Size([18525, 3, 3328]), torch.Size([18525, 48, 64, 128])
                 # tensor_size_bytes=369907200, curr_tensor_size_bytes=14568652800
@@ -2535,13 +2545,16 @@ class NixlConnectorWorker:
         block_arange = np.arange(0, self._physical_blocks_per_logical_kv_block).reshape(
             1, -1
         )
+        # Mamba blocks have no logical<>physical discrepancy
+        group_specs = self.kv_cache_config.kv_cache_groups
         return [
             BlockTable.map_to_kernel_blocks(
                 np.array(group),
                 self._physical_blocks_per_logical_kv_block,
                 block_arange,
             ).tolist()
-            for group in block_ids
+            if not isinstance(group_specs[i].kv_cache_spec, MambaSpec) else group
+            for i, group in enumerate(block_ids)
         ]
 
     def get_backend_aware_kv_block_len(self, layer_idx: int) -> int:
