@@ -810,6 +810,7 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
             "LayerNorm": "layernorm",
         },
     )
+    keys_to_ignore_on_load_missing = ["final_logits_bias"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
 
@@ -832,6 +833,9 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
         self.lm_head = BartParallelLMHead(config.vocab_size,
                                           config.d_model,
                                           embed_scale=embed_scale)
+        # Bias added to logits after lm_head, matching HuggingFace approach
+        self.register_buffer("final_logits_bias",
+                             torch.zeros((1, config.vocab_size)))
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
 
@@ -868,6 +872,8 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
     ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
+        if logits is not None:
+            logits = logits + self.final_logits_bias
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -875,11 +881,15 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
         weights_tuple_list = list(weights)
 
         shared_embedding_weight = None
+        # Load separately as buffers are not registered as nn.Module
+        final_logits_bias_weight = None
         for name, loaded_weight in weights_tuple_list:
-            if ('shared.weight' in name
-                    or 'encoder.embed_tokens.weight' in name
-                    or 'decoder.embed_tokens.weight' in name
-                    or 'lm_head.weight' in name):
+            if 'final_logits_bias' in name:
+                final_logits_bias_weight = loaded_weight
+            elif ('shared.weight' in name
+                  or 'encoder.embed_tokens.weight' in name
+                  or 'decoder.embed_tokens.weight' in name
+                  or 'lm_head.weight' in name):
                 if shared_embedding_weight is not None:
                     logger.warning(
                         "Shared weight embedding already loaded with name "
@@ -892,9 +902,15 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["cls.", "pooler."]),
+            skip_substrs=(["final_logits_bias"]),
         )
         loaded_params = loader.load_weights(weights_tuple_list,
                                             mapper=self.hf_to_vllm_mapper)
+
+        # Load final_logits_bias if present in checkpoint
+        if final_logits_bias_weight is not None:
+            self.final_logits_bias.copy_(final_logits_bias_weight)
+            loaded_params.add('final_logits_bias')
 
         if shared_embedding_weight is not None:
             weight_loader = getattr(self.lm_head.weight, "weight_loader",
@@ -907,6 +923,11 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
                 'model.encoder.embed_tokens.weight', 'lm_head.weight',
                 'model.decoder.embed_tokens.weight'
             })
+
+        # Add keys_to_ignore_on_load_missing to loaded_params so vLLM
+        # doesn't report them as missing (they use default initialized values)
+        for key in self.keys_to_ignore_on_load_missing:
+            loaded_params.add(key)
 
         return loaded_params
 
