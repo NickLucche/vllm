@@ -388,7 +388,6 @@ class TpKVTopology:
         # )
         self._is_kv_layout_blocks_first = True
 
-        self._kv_heads_position: int | None = None
         self._cross_layers_blocks = False
         # self._physical_block_size_position = 0
         if self.tensor_shape is not None:
@@ -423,9 +422,9 @@ class TpKVTopology:
     def split_k_and_v(self) -> bool:
         # Whether to register regions for K and V separately (when present).
         return True
-        return not (
-            self._cross_layers_blocks or self.is_mla or self.is_kv_layout_blocks_first
-        )
+        # return not (
+        #     self._cross_layers_blocks or self.is_mla or self.is_kv_layout_blocks_first
+        # )
 
     @property
     def tp_size(self) -> int:
@@ -442,7 +441,7 @@ class TpKVTopology:
     @property
     def block_size_position(self) -> int:
         # return self._physical_block_size_position
-        # TODO cpu check, rebase 
+        # TODO cpu check, rebase
         return -2 if self.is_mla else -3
 
     def tp_ratio(
