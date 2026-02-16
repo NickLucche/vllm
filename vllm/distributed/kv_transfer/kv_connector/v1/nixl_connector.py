@@ -1451,9 +1451,15 @@ class NixlConnectorWorker:
             else:
                 # TODO assuming FA for now in this branch, we want to treat it like FI and register the whole tensor.
                 #  Stride is already adjusted by manager. Shape's not.
-                cache_list = (
-                    cache_or_caches if self.kv_topo.split_k_and_v else [cache_or_caches]
-                )
+                # swap [2<>num_blocks, block_size, num_kv_heads, head_size] to match FI
+                if not isinstance(self._layer_specs[layer_name], MambaSpec): 
+                    cache_list = [cache_or_caches.transpose(0, 1)]
+                else:
+                    cache_list = (
+                        cache_or_caches if self.kv_topo.split_k_and_v else [cache_or_caches]
+                    )
+                    # FIXME to patch only once when mamba is detected, so no need to check here
+                    self.kv_topo._is_kv_layout_blocks_first = True
             if isinstance(self._layer_specs[layer_name], MambaSpec):
                 # Register the whole kv cache shared tensor, including SSM/Conv.
                 ssm, conv = cache_list
@@ -1464,7 +1470,7 @@ class NixlConnectorWorker:
                 cache_list = [ssm]
 
             print(f"{layer_name=}, {[v.shape for v in cache_list]}")
-            assert len(cache_list) == 1, f"Use FlashInfer for now!"
+            # assert len(cache_list) == 1, f"Use FlashInfer for now!"
             print(f"{layer_name=} strides, {[v.stride() for v in cache_list]}")
             # TODO (NickLucche) we could eventually unify how we handle FA/FI regions,
             # registering a single tensor for both K/V and splitting logically like FI.
