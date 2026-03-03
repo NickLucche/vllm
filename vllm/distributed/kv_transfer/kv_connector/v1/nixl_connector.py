@@ -952,6 +952,11 @@ class NixlConnectorWorker:
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
         )
         self.kv_cache_config = kv_cache_config
+        self._layer_specs = {
+            layer: group.kv_cache_spec
+            for group in kv_cache_config.kv_cache_groups
+            for layer in group.layer_names
+        }
 
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
@@ -1138,9 +1143,9 @@ class NixlConnectorWorker:
             self._physical_blocks_per_logical_kv_block = (
                 self.block_size // kernel_block_size
             )
-            self.block_size = kernel_block_size
-            self._block_size[self.engine_id] = kernel_block_size
-            self.num_blocks *= self._physical_blocks_per_logical_kv_block
+            # self.block_size = kernel_block_size
+            # self._block_size[self.engine_id] = kernel_block_size
+            # self.num_blocks *= self._physical_blocks_per_logical_kv_block
 
     def _nixl_handshake(
         self,
@@ -1461,10 +1466,20 @@ class NixlConnectorWorker:
 
         # Enable different block lengths for different layers when MLA is used.
         self.block_len_per_layer = list[int]()
-        self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
+        page_size_split_factor = 2 if self.kv_topo.split_k_and_v else 1
         for layer_name, cache_or_caches in xfer_buffers.items():
             cache_list = (
                 cache_or_caches if self.kv_topo.split_k_and_v else [cache_or_caches]
+            )
+            layer_spec = self._layer_specs[layer_name]
+            # Calculate the size of the region to register using the "logical" view
+            # as computed by the kv cache manager, instead of the tensor itself.
+            # This allows us to abstract most details of the underlying layout
+            # eg different block sizes for kernel.
+            # We do have to adjust `page_size_bytes` when registering K/V in
+            # separate regions though, as the manager is not aware of the split.
+            curr_tensor_size_bytes = (
+                self.num_blocks * layer_spec.page_size_bytes // page_size_split_factor
             )
             for cache in cache_list:
                 base_addr = cache.data_ptr()
@@ -1479,7 +1494,6 @@ class NixlConnectorWorker:
                     "Registering layer %s with cache shape: %s", layer_name, cache.shape
                 )
                 seen_base_addresses.append(base_addr)
-                curr_tensor_size_bytes = cache.numel() * cache.element_size()
 
                 if tensor_size_bytes is None:
                     tensor_size_bytes = curr_tensor_size_bytes
@@ -1490,9 +1504,6 @@ class NixlConnectorWorker:
 
                 self.block_len_per_layer.append(
                     curr_tensor_size_bytes // self.num_blocks
-                )
-                self.slot_size_per_layer.append(
-                    self.block_len_per_layer[-1] // self.block_size
                 )
 
                 if not self.use_mla:
@@ -1526,10 +1537,6 @@ class NixlConnectorWorker:
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
         if self.kv_topo.is_kv_layout_blocks_first:
-            for i in range(len(self.slot_size_per_layer)):
-                assert self.slot_size_per_layer[i] % 2 == 0
-                self.slot_size_per_layer[i] //= 2
-
             # NOTE (NickLucche) When FlashInfer is used, memory is registered
             # with joint KV for each block. This minimizes the overhead in
             # registerMem allowing faster descs queries. In order to be able to
@@ -2195,20 +2202,20 @@ class NixlConnectorWorker:
         We check for these trnxs to complete in each step().
         """
         for req_id, meta in metadata.reqs_to_recv.items():
+            # Kernel block IDs only needed for host buffer copy (copy_blocks
+            # indexes into kernel-shaped tensors). NIXL transfers use logical
+            # block IDs since descriptors are registered at logical boundaries.
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids
             )
             assert meta.remote is not None
-            meta.remote.block_ids = self._logical_to_kernel_block_ids(
-                meta.remote.block_ids
-            )
             remote_engine_id = meta.remote.engine_id
             logger.debug(
                 "start_load_kv for request %s from remote engine %s. "
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ",
                 req_id,
                 remote_engine_id,
-                len(meta.local_physical_block_ids),
+                len(meta.local_block_ids),
                 len(meta.remote.block_ids),
             )
             # always store metadata for failure recovery
@@ -2290,7 +2297,7 @@ class NixlConnectorWorker:
                 request_id=req_id,
                 dst_engine_id=meta.remote.engine_id,
                 remote_request_id=meta.remote.request_id,
-                local_block_ids=meta.local_physical_block_ids,
+                local_block_ids=meta.local_block_ids,
                 remote_block_ids=meta.remote.block_ids,
                 remote_rank=remote_rank,
                 local_xfer_side_handle=local_xfer_side_handle,
