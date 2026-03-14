@@ -158,7 +158,7 @@ run_tests_for_model() {
     VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
-    vllm serve $model_name \
+    chg run -g ${PREFILLER_TP_SIZE} -- vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
     --block-size ${PREFILL_BLOCK_SIZE} \
@@ -211,7 +211,7 @@ run_tests_for_model() {
     VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
-    vllm serve $model_name \
+    chg run -g ${DECODER_TP_SIZE} -- vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
     --block-size ${DECODE_BLOCK_SIZE} \
