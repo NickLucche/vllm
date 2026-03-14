@@ -1107,6 +1107,9 @@ class NixlConnectorWorker:
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
         self.num_regions = 0
+        # Region ids (for a single FA/Mamba descriptor view) grouped by cache type.
+        self._fa_region_ids = np.array([], dtype=np.int64)
+        self._mamba_region_ids = np.array([], dtype=np.int64)
 
         # nixl_prepped_dlist_handle.
         self.src_xfer_handles_by_block_size: dict[int, int] = {}
@@ -1524,6 +1527,9 @@ class NixlConnectorWorker:
         caches_data = []
         # With hybrid allocator, layers can share a kv cache tensor
         seen_base_addresses = []
+        # Track which cache families map to each registered base address.
+        # A shared tensor can be seen by both FA and Mamba layers.
+        base_addr_kv_kind: dict[int, dict[str, bool]] = {}
 
         # Note(tms): I modified this from the original region setup code.
         # K and V are now in different regions. Advantage is that we can
@@ -1574,6 +1580,13 @@ class NixlConnectorWorker:
             # registering a single tensor for both K/V and splitting logically like FI.
             for cache in cache_list:
                 base_addr = cache.data_ptr()
+                kv_kind = base_addr_kv_kind.setdefault(
+                    base_addr, {"fa": False, "mamba": False}
+                )
+                if isinstance(layer_spec, MambaSpec):
+                    kv_kind["mamba"] = True
+                else:
+                    kv_kind["fa"] = True
                 if base_addr in seen_base_addresses:
                     # NOTE (NickLucche) HMA employs memory pooling to share tensors
                     # across groups. This results in skipping all tensors but the ones
@@ -1617,6 +1630,14 @@ class NixlConnectorWorker:
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
+        base_fa_regions = []
+        base_mamba_regions = []
+        for i, base_addr in enumerate(seen_base_addresses):
+            kv_kind = base_addr_kv_kind[base_addr]
+            if kv_kind["fa"]:
+                base_fa_regions.append(i)
+            if kv_kind["mamba"]:
+                base_mamba_regions.append(i)
 
         if self.kv_topo.is_kv_layout_blocks_first:
             # NOTE (NickLucche) When FlashInfer is used, memory is registered
@@ -1628,6 +1649,17 @@ class NixlConnectorWorker:
             # Similarly for Mamba layers, we register SSM+Conv as a single region and
             # then duplicate it logically to be able to index SSM/Conv separately.
             self.num_regions *= 2
+            self._fa_region_ids = np.array(
+                [2 * i + split for i in base_fa_regions for split in (0, 1)],
+                dtype=np.int64,
+            )
+            self._mamba_region_ids = np.array(
+                [2 * i + split for i in base_mamba_regions for split in (0, 1)],
+                dtype=np.int64,
+            )
+        else:
+            self._fa_region_ids = np.array(base_fa_regions, dtype=np.int64)
+            self._mamba_region_ids = np.array(base_mamba_regions, dtype=np.int64)
 
         # TODO (NickLucche) Adapt to different descs views (engine_id->tp_rank) to
         # support heterogeneous TP.
@@ -1643,6 +1675,7 @@ class NixlConnectorWorker:
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
         if self._has_mamba:
+            assert self._mamba_region_ids.size > 0, "Missing registered mamba regions"
             logger.info(
                 "Hybrid SSM registration: num_blocks=%s, "
                 "logical_num_blocks=%s, ratio=%s, num_regions=%s, "
@@ -2593,6 +2626,19 @@ class NixlConnectorWorker:
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
+        logger.info(
+            "READ_DESC_MAP req=%s remote_rank=%s local_phys=%s remote_phys=%s "
+            "local_desc_count=%s remote_desc_count=%s "
+            "local_desc_head=%s remote_desc_head=%s",
+            request_id,
+            remote_rank,
+            [len(g) for g in local_block_ids],
+            [len(g) for g in remote_block_ids],
+            len(local_block_descs_ids),
+            len(remote_block_descs_ids),
+            local_block_descs_ids[: min(8, len(local_block_descs_ids))].tolist(),
+            remote_block_descs_ids[: min(8, len(remote_block_descs_ids))].tolist(),
+        )
 
         # Prepare transfer with Nixl.
         handle = None
@@ -2696,10 +2742,22 @@ class NixlConnectorWorker:
             num_fa_descs = self.num_regions * num_blocks
             all_descs = []
             for i, group in enumerate(block_ids):
-                stride = logical_blocks if self._is_mamba_group[i] else num_blocks
+                is_mamba_group = self._is_mamba_group[i]
+                target_region_ids = (
+                    self._mamba_region_ids if is_mamba_group else self._fa_region_ids
+                )
+                if target_region_ids.size == 0:
+                    raise RuntimeError(
+                        f"No registered {'Mamba' if is_mamba_group else 'FA'} "
+                        "regions found for hybrid descriptor indexing."
+                    )
+                stride = logical_blocks if is_mamba_group else num_blocks
                 group_arr = np.asarray(group)[None, :]
-                offset = num_fa_descs if self._is_mamba_group[i] else 0
-                all_descs.append((region_ids * stride + group_arr + offset).flatten())
+                offset = num_fa_descs if is_mamba_group else 0
+                group_region_ids = target_region_ids[:, None]
+                all_descs.append(
+                    (group_region_ids * stride + group_arr + offset).flatten()
+                )
             return np.concatenate(all_descs)
 
     def _logical_to_kernel_block_ids(self, block_ids: BlockIds) -> BlockIds:

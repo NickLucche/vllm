@@ -399,6 +399,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 self.kv_cache_spec,
                 self.vllm_config.cache_config.mamba_cache_mode,
             )
+        self._validate_state_indices_alignment(
+            block_table=common_attn_metadata.block_table_tensor,
+            seq_lens=common_attn_metadata.seq_lens,
+            state_indices_tensor=state_indices_tensor,
+        )
 
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)
@@ -476,6 +481,34 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         return self._update_metadata_for_cudagraph_capture(metadata)
 
+    def _validate_state_indices_alignment(
+        self,
+        block_table: torch.Tensor,
+        seq_lens: torch.Tensor,
+        state_indices_tensor: torch.Tensor,
+    ) -> None:
+        """Sanity-check row-wise alignment for Mamba state indexing metadata."""
+        assert block_table.shape[0] == seq_lens.shape[0], (
+            "Mamba metadata mismatch: block_table and seq_lens row counts differ."
+        )
+        assert state_indices_tensor.shape[0] == block_table.shape[0], (
+            "Mamba metadata mismatch: state indices rows differ from block_table."
+        )
+        if state_indices_tensor.shape[0] == 0:
+            return
+        start_indices = torch.clamp(
+            (seq_lens.to(torch.int64) - 1) // self.kv_cache_spec.block_size,
+            min=0,
+        )
+        expected_first = block_table.gather(
+            1, start_indices.unsqueeze(1).to(torch.int64)
+        ).squeeze(1)
+        actual_first = state_indices_tensor[:, 0].to(torch.int64)
+        assert torch.equal(actual_first, expected_first), (
+            "Mamba metadata mismatch: state_indices rows are not aligned with "
+            "block_table/seq_lens."
+        )
+
     def _update_metadata_for_cudagraph_capture(
         self,
         metadata: M,
@@ -552,6 +585,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             metadata.seq_lens,
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
+        )
+        self._validate_state_indices_alignment(
+            block_table=blk_table,
+            seq_lens=metadata.seq_lens,
+            state_indices_tensor=state_indices_tensor,
         )
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)
