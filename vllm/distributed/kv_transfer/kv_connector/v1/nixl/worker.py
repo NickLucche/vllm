@@ -1801,6 +1801,7 @@ class NixlConnectorWorker:
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
             in_progress = []
+            had_failure = False
             for handle in handles:
                 try:
                     xfer_state = self.nixl_wrapper.check_xfer_state(handle)
@@ -1820,6 +1821,7 @@ class NixlConnectorWorker:
                             xfer_state=xfer_state,
                         )
                         self._handle_failed_transfer(req_id, handle)
+                        had_failure = True
                 except Exception as e:
                     self._log_failure(
                         failure_type="transfer_exception",
@@ -1828,6 +1830,15 @@ class NixlConnectorWorker:
                         error=e,
                     )
                     self._handle_failed_transfer(req_id, handle)
+                    had_failure = True
+
+            if had_failure:
+                # NOTE (NickLucche): Fail-fast, treat any remaining in-progress handles
+                # (only for P TP > D TP) as failures. Next step would trigger an assert
+                # in get_finished() as metadata is cleared. This inhibits block-level
+                # recovery,which is anyway unreliable in this case and being deprecated
+                for h in in_progress:
+                    self._handle_failed_transfer(req_id, h)
 
             if not in_progress:
                 # Only report request as completed when all transfers are done.
