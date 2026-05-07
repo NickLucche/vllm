@@ -322,10 +322,22 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
             rope_theta is not None or partial_rotary_factor is not None
         ) and not getattr(config, "rope_parameters", None):
             config.rope_parameters = {"rope_type": "default"}
-        if rope_theta is not None:
-            config.rope_parameters["rope_theta"] = rope_theta
-        if partial_rotary_factor is not None:
-            config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
+        existing_rp = getattr(config, "rope_parameters", None)
+        if existing_rp is not None and set(existing_rp.keys()).issubset(
+            ALLOWED_LAYER_TYPES
+        ):
+            for layer_rp in existing_rp.values():
+                if rope_theta is not None:
+                    layer_rp.setdefault("rope_theta", rope_theta)
+                if partial_rotary_factor is not None:
+                    layer_rp.setdefault("partial_rotary_factor",
+                                        partial_rotary_factor)
+        else:
+            if rope_theta is not None:
+                config.rope_parameters["rope_theta"] = rope_theta
+            if partial_rotary_factor is not None:
+                config.rope_parameters["partial_rotary_factor"] = (
+                    partial_rotary_factor)
     elif rope_theta is not None or getattr(config, "rope_parameters", None):
         # Transformers v5 installed
         # Patch these fields in case they used non-standard names
