@@ -262,6 +262,7 @@ class ModelArchConfigConvertorBase:
             "glm_moe_dsa",
             "glm4_moe_lite",
             "glm4_moe_lite_mtp",
+            "hybrid_mla_gqa",
             "kimi_k2",
             "kimi_linear",
             "longcat_flash",
