@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 import time
 from collections.abc import Mapping
 from typing import Any, Literal
@@ -71,17 +70,6 @@ class InputProcessor:
             renderer=renderer,
             mm_registry=mm_registry,
         )
-
-        kv_cfg = vllm_config.kv_transfer_config
-        self._disable_request_id_randomization = (
-            kv_cfg is not None and kv_cfg.is_kv_transfer_instance
-        )
-        if os.environ.get("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION"):
-            logger.warning_once(
-                "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION has been removed. "
-                "Request ID randomization is now automatically disabled "
-                "for KV transfer (P/D disaggregated) instances."
-            )
 
     @property
     def tokenizer(self) -> TokenizerLike | None:
@@ -230,13 +218,10 @@ class InputProcessor:
                 exc_info=True,
             )
 
-    def assign_request_id(self, request: EngineCoreRequest):
+    @staticmethod
+    def assign_request_id(request: EngineCoreRequest):
         """Replace the externally supplied request ID with an internal request ID
         that adds 8 random characters in order to ensure uniqueness.
-
-        Randomization is automatically skipped for KV transfer (P/D
-        disaggregated) instances, where connectors and external proxies
-        rely on predictable request IDs across nodes.
         """
         if request.external_req_id is not None:
             raise ValueError(
@@ -244,8 +229,7 @@ class InputProcessor:
                 " passed to vLLM; use the request_id field."
             )
         request.external_req_id = request.request_id
-        if not self._disable_request_id_randomization:
-            request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
+        request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
 
     def process_inputs(
         self,

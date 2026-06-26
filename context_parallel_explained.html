@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Context Parallel in vLLM &mdash; explained</title>
+<style>
+  :root{
+    --bg:#0f1117; --panel:#171a23; --panel2:#1f2330; --ink:#e6e8ee; --muted:#9aa3b2;
+    --accent:#7c9cff; --accent2:#4dd6a0; --warn:#ffb454; --line:#2a2f3d;
+    --r0:#5b8def; --r1:#e2725b; --r2:#46b18b; --r3:#b58cf0;
+    --code:#11141b;
+    --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.65;font-size:16px}
+  .wrap{max-width:1040px;margin:0 auto;padding:40px 24px 120px}
+  header{border-bottom:1px solid var(--line);padding-bottom:28px;margin-bottom:36px}
+  h1{font-size:2.2rem;margin:0 0 8px;letter-spacing:-.02em}
+  h2{font-size:1.55rem;margin:56px 0 14px;letter-spacing:-.01em;
+    padding-top:10px;border-top:1px solid var(--line)}
+  h3{font-size:1.18rem;margin:32px 0 10px;color:var(--accent)}
+  h4{font-size:1.02rem;margin:22px 0 8px;color:var(--accent2)}
+  p{color:var(--ink)}
+  .lede{font-size:1.12rem;color:var(--muted);max-width:80ch}
+  .muted{color:var(--muted)}
+  code{font-family:var(--mono);background:#22273400;color:var(--accent2);
+    font-size:.92em;padding:1px 5px;border-radius:5px;background:#212636}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:10px;
+    padding:16px 18px;overflow-x:auto;font-family:var(--mono);font-size:.86rem;
+    line-height:1.55;color:#cdd3e0}
+  pre .cm{color:#6b7384}
+  pre .kw{color:#7c9cff}
+  pre .st{color:#4dd6a0}
+  pre .fn{color:#ffb454}
+  a{color:var(--accent)}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:20px 22px;margin:20px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr}}
+  .tag{display:inline-block;font-family:var(--mono);font-size:.72rem;
+    padding:2px 9px;border-radius:20px;border:1px solid var(--line);
+    background:var(--panel2);color:var(--muted);margin-right:6px}
+  .callout{border-left:3px solid var(--accent);background:var(--panel2);
+    padding:14px 18px;border-radius:0 10px 10px 0;margin:18px 0}
+  .callout.warn{border-color:var(--warn)}
+  .callout.ok{border-color:var(--accent2)}
+  table{border-collapse:collapse;width:100%;margin:16px 0;font-size:.92rem}
+  th,td{border:1px solid var(--line);padding:8px 12px;text-align:left}
+  th{background:var(--panel2);color:var(--muted);font-weight:600}
+  td code{background:none;padding:0}
+  .filepath{font-family:var(--mono);font-size:.78rem;color:var(--muted);
+    margin:0 0 8px;display:block}
+  /* grid diagram */
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin:10px 0 16px;font-size:.85rem}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .swatch{width:14px;height:14px;border-radius:3px;display:inline-block}
+  .r0{background:var(--r0)} .r1{background:var(--r1)}
+  .r2{background:var(--r2)} .r3{background:var(--r3)}
+  .toc{columns:2;font-size:.93rem}
+  @media(max-width:760px){.toc{columns:1}}
+  .toc a{display:block;padding:3px 0;text-decoration:none;color:var(--muted)}
+  .toc a:hover{color:var(--accent)}
+  .toc .lvl2{padding-left:14px;font-size:.88rem}
+  figure{margin:22px 0}
+  figcaption{color:var(--muted);font-size:.85rem;margin-top:8px;text-align:center}
+  .center{text-align:center}
+  .pill{font-family:var(--mono);font-size:.8rem;background:var(--panel2);
+    border:1px solid var(--line);border-radius:6px;padding:2px 8px}
+  hr{border:none;border-top:1px solid var(--line);margin:40px 0}
+  .kbd{font-family:var(--mono);font-size:.8rem}
+  .eq{font-family:var(--mono);background:var(--panel2);border:1px solid var(--line);
+    border-radius:8px;padding:12px 16px;display:block;margin:12px 0;color:#cdd3e0;
+    overflow-x:auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div><span class="tag">vLLM</span><span class="tag">distributed</span><span class="tag">kv-cache</span></div>
+  <h1>Context Parallel in vLLM</h1>
+  <p class="lede">How vLLM splits a single request's sequence dimension across GPUs &mdash;
+  Prefill CP, Decode CP, and the exact mechanics of
+  <code>cp_kv_cache_interleave_size</code>.</p>
+</header>
+
+<nav class="panel toc">
+  <a href="#why">1. Why context parallel?</a>
+  <a href="#axes" class="lvl2">The four parallelism axes</a>
+  <a href="#pcp">2. Prefill Context Parallel (PCP)</a>
+  <a href="#dcp">3. Decode Context Parallel (DCP)</a>
+  <a href="#dcp-prefill" class="lvl2">What does DCP do during prefill?</a>
+  <a href="#combined" class="lvl2">Combining PCP &amp; DCP: the unified rank</a>
+  <a href="#whytwo">Why two knobs and not one?</a>
+  <a href="#interleave">4. cp_kv_cache_interleave_size</a>
+  <a href="#interleave-1" class="lvl2">Mode A: interleave = 1 (token-level)</a>
+  <a href="#interleave-b" class="lvl2">Mode B: interleave = block_size</a>
+  <a href="#kernel">5. The slot-mapping kernel</a>
+  <a href="#seqlens">6. Per-rank sequence lengths</a>
+  <a href="#config">7. Config, defaults &amp; validation</a>
+  <a href="#cheat">8. Cheat sheet</a>
+</nav>
+
+<!-- ============================================================ -->
+<h2 id="why">1. Why context parallel?</h2>
+<p>Context Parallel (CP) attacks the <strong>long-context</strong> problem: a single request
+whose sequence is too long to serve efficiently on the existing parallelism layout. Instead of
+sharding the <em>model</em> (weights, heads), CP shards along the <strong>token / sequence
+(<code>T</code>) dimension</strong> of one request.</p>
+
+<p>vLLM treats prefill and decode separately, because they have opposite bottlenecks:</p>
+
+<div class="grid2">
+  <div class="panel">
+    <h4 style="margin-top:0">Prefill</h4>
+    <p class="muted" style="margin:0">Many query tokens, computed once. Goal: lower
+    <strong>TTFT</strong> by amortizing the prefill compute across GPUs.
+    &rarr; <em>Prefill Context Parallel (PCP)</em>.</p>
+  </div>
+  <div class="panel">
+    <h4 style="margin-top:0">Decode</h4>
+    <p class="muted" style="margin:0">One query token per step, attending to a huge stored KV
+    cache. Goal: more room for KV cache &rarr; bigger batch &rarr; throughput.
+    &rarr; <em>Decode Context Parallel (DCP)</em>.</p>
+  </div>
+</div>
+
+<h3 id="axes">The four parallelism axes</h3>
+<p>CP sits alongside the existing parallel dimensions. A useful mental model:</p>
+
+<figure>
+<svg viewBox="0 0 920 250" width="100%" font-family="-apple-system,sans-serif">
+  <!-- TP -->
+  <rect x="10" y="20" width="210" height="200" rx="10" fill="#1f2330" stroke="#2a2f3d"/>
+  <text x="115" y="45" fill="#7c9cff" font-size="15" font-weight="700" text-anchor="middle">Tensor Parallel (TP)</text>
+  <text x="115" y="66" fill="#9aa3b2" font-size="11.5" text-anchor="middle">shards weights + KV heads (H)</text>
+  <rect x="30" y="85" width="80" height="50" rx="6" fill="#5b8def33" stroke="#5b8def"/>
+  <rect x="120" y="85" width="80" height="50" rx="6" fill="#5b8def33" stroke="#5b8def"/>
+  <text x="70" y="115" fill="#e6e8ee" font-size="11" text-anchor="middle">head 0,1</text>
+  <text x="160" y="115" fill="#e6e8ee" font-size="11" text-anchor="middle">head 2,3</text>
+  <text x="115" y="170" fill="#9aa3b2" font-size="10.5" text-anchor="middle">limited by #kv-heads;</text>
+  <text x="115" y="186" fill="#9aa3b2" font-size="10.5" text-anchor="middle">beyond H, KV cache</text>
+  <text x="115" y="202" fill="#9aa3b2" font-size="10.5" text-anchor="middle">gets duplicated</text>
+
+  <!-- arrow -->
+  <text x="245" y="125" fill="#9aa3b2" font-size="22" text-anchor="middle">+</text>
+
+  <!-- DCP -->
+  <rect x="270" y="20" width="210" height="200" rx="10" fill="#1f2330" stroke="#46b18b"/>
+  <text x="375" y="45" fill="#4dd6a0" font-size="15" font-weight="700" text-anchor="middle">Decode CP (DCP)</text>
+  <text x="375" y="66" fill="#9aa3b2" font-size="11.5" text-anchor="middle">shards KV cache along T</text>
+  <rect x="290" y="85" width="40" height="50" rx="5" fill="#46b18b33" stroke="#46b18b"/>
+  <rect x="335" y="85" width="40" height="50" rx="5" fill="#46b18b33" stroke="#46b18b"/>
+  <rect x="380" y="85" width="40" height="50" rx="5" fill="#46b18b33" stroke="#46b18b"/>
+  <rect x="425" y="85" width="40" height="50" rx="5" fill="#46b18b33" stroke="#46b18b"/>
+  <text x="375" y="115" fill="#e6e8ee" font-size="10.5" text-anchor="middle">T-chunks</text>
+  <text x="375" y="170" fill="#9aa3b2" font-size="10.5" text-anchor="middle">reuses TP GPUs, no</text>
+  <text x="375" y="186" fill="#9aa3b2" font-size="10.5" text-anchor="middle">extra GPUs; removes</text>
+  <text x="375" y="202" fill="#9aa3b2" font-size="10.5" text-anchor="middle">KV duplication</text>
+
+  <text x="505" y="125" fill="#9aa3b2" font-size="22" text-anchor="middle">+</text>
+
+  <!-- PCP -->
+  <rect x="530" y="20" width="210" height="200" rx="10" fill="#1f2330" stroke="#e2725b"/>
+  <text x="635" y="45" fill="#e2725b" font-size="15" font-weight="700" text-anchor="middle">Prefill CP (PCP)</text>
+  <text x="635" y="66" fill="#9aa3b2" font-size="11.5" text-anchor="middle">splits prefill Q/K/V chunks</text>
+  <rect x="550" y="85" width="40" height="50" rx="5" fill="#e2725b33" stroke="#e2725b"/>
+  <rect x="595" y="85" width="40" height="50" rx="5" fill="#e2725b33" stroke="#e2725b"/>
+  <rect x="640" y="85" width="40" height="50" rx="5" fill="#e2725b33" stroke="#e2725b"/>
+  <rect x="685" y="85" width="40" height="50" rx="5" fill="#e2725b33" stroke="#e2725b"/>
+  <text x="635" y="170" fill="#9aa3b2" font-size="10.5" text-anchor="middle">amortizes long-prefill</text>
+  <text x="635" y="186" fill="#9aa3b2" font-size="10.5" text-anchor="middle">compute &rarr; lowers TTFT</text>
+  <text x="635" y="202" fill="#9aa3b2" font-size="10.5" text-anchor="middle">(under development)</text>
+
+  <text x="765" y="125" fill="#9aa3b2" font-size="22" text-anchor="middle">+</text>
+  <rect x="790" y="60" width="120" height="120" rx="10" fill="#1f2330" stroke="#2a2f3d"/>
+  <text x="850" y="115" fill="#b58cf0" font-size="14" font-weight="700" text-anchor="middle">PP / DP</text>
+  <text x="850" y="138" fill="#9aa3b2" font-size="10.5" text-anchor="middle">orthogonal</text>
+</svg>
+<figcaption>CP is layered on top of TP. DCP and PCP both shard the sequence dimension,
+but at different lifecycle stages.</figcaption>
+</figure>
+
+<div class="callout">
+<strong>Key insight (from the deployment guide):</strong> TP can only shard the KV cache up to the
+number of KV heads <code>H</code>. Past that, <code>tp_size / H</code> copies of the KV cache are
+<em>duplicated</em>. DCP shards along <code>T</code> instead, reclaiming that wasted memory
+<em>without launching more GPUs</em>. Valid DCP range: <code>[1, tp_size / H]</code>.
+<span class="filepath" style="margin-top:8px">docs/serving/context_parallel_deployment.md</span>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="pcp">2. Prefill Context Parallel (PCP)</h2>
+<span class="filepath">vllm/config/parallel.py &middot; <code>prefill_context_parallel_size</code></span>
+<p>For a long prefill of <code>T</code> new tokens across <code>N</code> GPUs, vLLM splits the
+request into <code>N</code> chunks; each GPU computes Q/K/V for its chunk. There are two strategies:</p>
+
+<div class="grid2">
+  <div class="panel">
+    <h4 style="margin-top:0">Partial query, full K/V</h4>
+    <p class="muted" style="margin:0">When the sequence still fits: gather K/V from all GPUs, each
+    GPU computes attention only for <em>its</em> query chunk. Accelerates prefill, lowers TTFT.</p>
+  </div>
+  <div class="panel">
+    <h4 style="margin-top:0">Partial query, partial K/V</h4>
+    <p class="muted" style="margin:0">When the sequence is too long to hold full K/V: keep only your
+    chunk and stream K/V around the ring &mdash;
+    <a href="http://arxiv.org/abs/2310.01889">ring attention</a>.</p>
+  </div>
+</div>
+<p class="muted">Both PCP strategies are under active development. PCP is configured via
+<code>--prefill-context-parallel-size</code> (<code>pcp_size</code>).</p>
+
+<!-- ============================================================ -->
+<h2 id="dcp">3. Decode Context Parallel (DCP)</h2>
+<span class="filepath">vllm/config/parallel.py &middot; <code>decode_context_parallel_size</code> &middot; CLI: <code>-dcp</code></span>
+
+<p>Decoding is auto-regressive: each step has a <em>tiny</em> query (1 token) attending to a
+<em>large</em> stored KV cache. So DCP's whole job is <strong>how to shard the paged KV cache
+across GPUs</strong> &mdash; and crucially, to do it so that the cache can keep growing token by
+token during decode while staying balanced.</p>
+
+<p>vLLM solves this with an <strong>interleaving strategy</strong> along the <code>T</code>
+dimension (credited to Chao Hong / Moonshot,
+<a href="http://arxiv.org/abs/2507.07120">paper</a>). Each new token is deterministically routed
+to one CP rank based on its position. That routing is exactly what
+<code>cp_kv_cache_interleave_size</code> controls.</p>
+
+<div class="callout ok">
+<strong>Where the gain comes from:</strong> with DeepSeek-R1 (1 KV head under MLA),
+<code>-tp 8</code> duplicates the KV cache 8&times;. Adding <code>-dcp 8</code> shards it instead,
+giving ~8&times; more usable KV cache space &rarr; larger batch &rarr; higher throughput. The cost
+is extra cross-rank communication per decode step.
+</div>
+
+<h3 id="dcp-prefill">What does DCP do during <em>prefill</em>? (e.g. <code>-tp4 -dcp4</code>, no PCP)</h3>
+<p>A common point of confusion: if DCP is a <em>decode</em> feature, what happens to the prefill
+phase when you launch with only <code>-tp4 -dcp4</code>? The short answer:
+<strong>prefill compute is not parallelized across the sequence &mdash; every DCP rank still
+processes the full prefill query. DCP only changes <em>where the KV gets stored</em>.</strong>
+You get DCP's memory benefit during prefill, but not a TTFT/compute benefit (that would be PCP,
+which you didn't set).</p>
+
+<table>
+<thead><tr><th>Step</th><th>What happens under DCP-only prefill</th><th>Source</th></tr></thead>
+<tbody>
+<tr><td><strong>Query</strong></td>
+  <td><strong>Replicated, not split.</strong> Since PCP=1, there is no query-chunking; the query is
+  all-gathered so each rank works on the whole prefill.</td>
+  <td><code>flash_attn.py:984</code> &mdash; <code>all_gather(query, dim=1)</code></td></tr>
+<tr><td><strong>KV write</strong></td>
+  <td><strong>Sharded &mdash; this is the real effect.</strong> The slot-mapping marks each token
+  <code>is_local</code> only on its owning rank and returns <code>PAD_ID=-1</code> elsewhere;
+  <code>reshape_and_cache_flash</code> skips <code>-1</code> slots. KV is first created during
+  prefill, so that's exactly when de-duplication must happen.</td>
+  <td><code>block_table.py:368</code></td></tr>
+<tr><td><strong>Attention</strong></td>
+  <td>Stays correct via a two-phase scheme: a <em>new-token</em> phase (local causal self-attention
+  over this batch's K/V) + a <em>context</em> phase (each rank attends to its local KV shard, then
+  ranks combine via an LSE all-gather + reduce-scatter). The KV cache itself is <strong>never</strong>
+  all-gathered &mdash; only the small LSE/output tensors move.</td>
+  <td><code>ops/common.py:199</code> (<code>cp_lse_ag_out_rs</code>)</td></tr>
+</tbody>
+</table>
+
+<div class="callout warn">
+<strong>The cost:</strong> because the query is replicated, each rank redundantly computes attention
+for the <em>full</em> query against its KV shard &mdash; prefill FLOPs aren't reduced, and you pay
+extra all-gather/LSE communication per layer. So <code>-dcp 4</code> during prefill means "pay a
+little extra comm to store KV sharded," <em>not</em> "make prefill faster."
+</div>
+
+<div class="callout">
+<strong>Caveat for <code>tp4 dcp4</code>:</strong> the useful DCP range is
+<code>[1, tp_size / H]</code> where <code>H</code> = KV heads. <code>tp4 dcp4</code> only makes sense
+when <code>H = 1</code> (an MLA model like DeepSeek-R1 / Kimi). For a model with, say, 4 KV heads,
+<code>tp/H = 1</code>, so TP alone already shards the KV with zero duplication and DCP buys nothing
+&mdash; even though <code>tp % dcp == 0</code> passes the hard assertion.
+</div>
+
+<h3 id="combined">Combining PCP &amp; DCP: the unified rank</h3>
+<p>When both are active, vLLM flattens them into a single <em>total CP</em> coordinate. Every token
+is owned by exactly one <code>total_cp_rank</code>:</p>
+
+<span class="eq">total_cp_world_size = pcp_world_size &times; dcp_world_size</span>
+<span class="eq">total_cp_rank&nbsp;&nbsp;&nbsp; = pcp_rank &times; dcp_world_size + dcp_rank</span>
+
+<p class="muted">Everything below uses <code>total_cp_world_size</code> (abbreviated
+<span class="pill">CP</span> in diagrams) and <code>total_cp_rank</code>. With DCP alone,
+<code>total_cp_world_size == dcp_world_size</code>.</p>
+
+<!-- ============================================================ -->
+<h2 id="whytwo">Why two knobs and not one?</h2>
+<p>A natural question: a request flows through prefill <em>and then</em> decode &mdash; why isn't CP
+a single number? Because PCP and DCP are <strong>physically different operations</strong> on
+different resources. The decisive line in the config makes it concrete:</p>
+
+<span class="filepath">vllm/config/parallel.py:784</span>
+<pre>world_size = pipeline_parallel_size * tensor_parallel_size * <span class="fn">prefill_context_parallel_size</span>
+<span class="cm"># note: decode_context_parallel_size does NOT appear here</span></pre>
+
+<div class="callout warn">
+<strong>PCP multiplies the world size &mdash; it adds GPUs. DCP does not appear at all &mdash; it
+reuses the TP group's existing GPUs</strong> (<code>tp_size % dcp_size == 0</code>). One knob is
+impossible: it would have to mean "add GPUs" and "don't add GPUs" at the same time.
+</div>
+
+<p>That asymmetry isn't an implementation quirk &mdash; it falls directly out of what each phase
+needs:</p>
+
+<table>
+<thead><tr><th></th><th>Prefill CP</th><th>Decode CP</th></tr></thead>
+<tbody>
+<tr><td><strong>Bottleneck</strong></td>
+  <td>compute (TTFT) &mdash; thousands of query tokens at once</td>
+  <td>memory (KV capacity) &mdash; 1 query token, huge stored KV</td></tr>
+<tr><td><strong>What you split</strong></td>
+  <td>the Q/K/V <em>computation</em> of new tokens</td>
+  <td>the <em>stored KV cache</em> along <code>T</code></td></tr>
+<tr><td><strong>GPUs</strong></td>
+  <td><strong>adds</strong> them (<code>world_size &times;= pcp</code>)</td>
+  <td><strong>reuses</strong> TP GPUs (no new GPUs)</td></tr>
+<tr><td><strong>Goal</strong></td>
+  <td>more FLOPs on the prefill in parallel</td>
+  <td>kill the <code>tp_size/H</code> KV duplication &rarr; bigger batch</td></tr>
+</tbody>
+</table>
+
+<p>The phases pull on opposite resources, so fusing them would force you to over-provision one to
+satisfy the other:</p>
+<ul>
+<li><strong>Prefill is compute-bound</strong> &mdash; a wall of query tokens, so more GPUs (PCP)
+directly cut TTFT. There is real work to parallelize.</li>
+<li><strong>Decode is memory-bound</strong> &mdash; only <em>one</em> query token per step, so adding
+GPUs to compute it buys nothing. That's exactly why DCP is capped at <code>tp_size/H</code>. What you
+want is to stop <em>wasting</em> memory on duplicated KV &mdash; DCP shards the cache in place on
+GPUs you already have.</li>
+</ul>
+
+<h3>The one thing they <em>do</em> share: the KV layout</h3>
+<p>Once a token's KV exists, it must be <em>stored</em> somewhere consistent so that decode can find
+it later. That storage routing genuinely <em>is</em> a single knob &mdash;
+<code>cp_kv_cache_interleave_size</code> &mdash; applied over the flattened
+<code>total_cp_world_size</code>. This is why the older <code>dcp_kv_cache_interleave_size</code> is
+being deprecated in favour of the unified <code>cp_kv_cache_interleave_size</code>: the
+<em>layout</em> knob unifies even though the <em>parallelism</em> knobs cannot.</p>
+
+<div class="callout ok">
+<strong>Mental model:</strong> two knobs for <em>"how do I parallelize the work"</em> (the work is
+different in each phase) + one knob for <em>"how do I lay out the resulting KV cache"</em> (the cache
+is shared across phases).
+</div>
+
+<!-- ============================================================ -->
+<h2 id="interleave">4. <code>cp_kv_cache_interleave_size</code></h2>
+<span class="filepath">vllm/config/parallel.py:351</span>
+
+<p>This single integer decides <strong>the granularity at which consecutive tokens are handed out to
+CP ranks</strong>. The rule, straight from the source docstring:</p>
+
+<div class="callout">
+Store <code>interleave_size</code> tokens on <code>total_cp_rank i</code>, then store the next
+<code>interleave_size</code> tokens on <code>total_cp_rank i+1</code>, wrapping around.
+</div>
+
+<p>The owning rank for a token at virtual-block offset <code>o</code> is simply:</p>
+<span class="eq">owner_rank(o) = (o // interleave_size) % total_cp_world_size</span>
+
+<p>Two extremes matter, and the config supports anything in between (as long as it divides
+<code>block_size</code>):</p>
+
+<table>
+<thead><tr><th>Value</th><th>Alignment</th><th>Behaviour</th></tr></thead>
+<tbody>
+<tr><td><code>1</code> <span class="muted">(default)</span></td><td>token-level</td>
+  <td>Pure round-robin: token <code>i</code> &rarr; rank <code>i % CP</code>. Finest balance.</td></tr>
+<tr><td><code>block_size</code></td><td>block-level</td>
+  <td>Fill rank <code>i</code>'s whole block before moving to rank <code>i+1</code>.</td></tr>
+<tr><td><code>k</code> (between)</td><td>chunk-level</td>
+  <td>Hand out <code>k</code>-token chunks round-robin. Must divide <code>block_size</code>.</td></tr>
+</tbody>
+</table>
+
+<p>For the diagrams below: <span class="pill">total_cp_world_size = 4</span>
+<span class="pill">block_size = 4</span> &rArr;
+<span class="pill">virtual_block_size = block_size &times; CP = 16</span>. A "virtual block" is the span of
+global token positions that maps onto one physical block on <em>each</em> of the 4 ranks.</p>
+
+<div class="legend">
+  <span><span class="swatch r0"></span>rank 0</span>
+  <span><span class="swatch r1"></span>rank 1</span>
+  <span><span class="swatch r2"></span>rank 2</span>
+  <span><span class="swatch r3"></span>rank 3</span>
+</div>
+
+<!-- ===== interleave = 1 ===== -->
+<h3 id="interleave-1">Mode A &mdash; <code>interleave_size = 1</code> (token-level round-robin)</h3>
+<p>Global token positions 0..15 (one virtual block), colored by owning rank.
+<code>owner = pos % 4</code>:</p>
+
+<figure>
+<svg viewBox="0 0 880 120" width="100%" font-family="var(--mono),monospace">
+  <!-- 16 cells -->
+  <g font-size="13" text-anchor="middle">
+    <!-- generated cells: pos i, color i%4 -->
+    <!-- row of global positions -->
+    <text x="20" y="20" fill="#9aa3b2" font-size="11" text-anchor="start">global pos &rarr;</text>
+    <!-- cells -->
+    <!-- We'll lay 16 cells starting x=20 width 52 -->
+    <!-- pos 0 r0 -->
+    <rect x="20"  y="32" width="50" height="50" rx="6" fill="#5b8def" opacity="0.85"/><text x="45"  y="62" fill="#fff">0</text>
+    <rect x="72"  y="32" width="50" height="50" rx="6" fill="#e2725b" opacity="0.85"/><text x="97"  y="62" fill="#fff">1</text>
+    <rect x="124" y="32" width="50" height="50" rx="6" fill="#46b18b" opacity="0.85"/><text x="149" y="62" fill="#fff">2</text>
+    <rect x="176" y="32" width="50" height="50" rx="6" fill="#b58cf0" opacity="0.85"/><text x="201" y="62" fill="#fff">3</text>
+    <rect x="228" y="32" width="50" height="50" rx="6" fill="#5b8def" opacity="0.85"/><text x="253" y="62" fill="#fff">4</text>
+    <rect x="280" y="32" width="50" height="50" rx="6" fill="#e2725b" opacity="0.85"/><text x="305" y="62" fill="#fff">5</text>
+    <rect x="332" y="32" width="50" height="50" rx="6" fill="#46b18b" opacity="0.85"/><text x="357" y="62" fill="#fff">6</text>
+    <rect x="384" y="32" width="50" height="50" rx="6" fill="#b58cf0" opacity="0.85"/><text x="409" y="62" fill="#fff">7</text>
+    <rect x="436" y="32" width="50" height="50" rx="6" fill="#5b8def" opacity="0.85"/><text x="461" y="62" fill="#fff">8</text>
+    <rect x="488" y="32" width="50" height="50" rx="6" fill="#e2725b" opacity="0.85"/><text x="513" y="62" fill="#fff">9</text>
+    <rect x="540" y="32" width="50" height="50" rx="6" fill="#46b18b" opacity="0.85"/><text x="565" y="62" fill="#fff">10</text>
+    <rect x="592" y="32" width="50" height="50" rx="6" fill="#b58cf0" opacity="0.85"/><text x="617" y="62" fill="#fff">11</text>
+    <rect x="644" y="32" width="50" height="50" rx="6" fill="#5b8def" opacity="0.85"/><text x="669" y="62" fill="#fff">12</text>
+    <rect x="696" y="32" width="50" height="50" rx="6" fill="#e2725b" opacity="0.85"/><text x="721" y="62" fill="#fff">13</text>
+    <rect x="748" y="32" width="50" height="50" rx="6" fill="#46b18b" opacity="0.85"/><text x="773" y="62" fill="#fff">14</text>
+    <rect x="800" y="32" width="50" height="50" rx="6" fill="#b58cf0" opacity="0.85"/><text x="825" y="62" fill="#fff">15</text>
+  </g>
+  <text x="20" y="105" fill="#9aa3b2" font-size="11">owner = pos % 4 &nbsp;&middot;&nbsp; perfectly balanced even for short / odd-length sequences</text>
+</svg>
+<figcaption>Each rank receives every 4th token. After 16 tokens, each rank holds exactly 4 tokens
+(one full physical block).</figcaption>
+</figure>
+
+<p>What each rank physically stores (its local block slots 0..3):</p>
+<figure>
+<svg viewBox="0 0 880 230" width="100%" font-family="var(--mono),monospace" font-size="12">
+  <g text-anchor="middle">
+  <!-- rank rows -->
+  <!-- labels -->
+  <text x="70" y="35" fill="#5b8def" text-anchor="end">rank 0</text>
+  <text x="70" y="85" fill="#e2725b" text-anchor="end">rank 1</text>
+  <text x="70" y="135" fill="#46b18b" text-anchor="end">rank 2</text>
+  <text x="70" y="185" fill="#b58cf0" text-anchor="end">rank 3</text>
+  <text x="90" y="215" fill="#9aa3b2" text-anchor="start" font-size="11">local slot:</text>
+  <text x="150" y="215" fill="#9aa3b2" font-size="11">0</text>
+  <text x="320" y="215" fill="#9aa3b2" font-size="11">1</text>
+  <text x="490" y="215" fill="#9aa3b2" font-size="11">2</text>
+  <text x="660" y="215" fill="#9aa3b2" font-size="11">3</text>
+
+  <!-- rank0 holds tokens 0,4,8,12 -->
+  <rect x="90"  y="14" width="150" height="38" rx="6" fill="#5b8def" opacity=".85"/><text x="165" y="38" fill="#fff">tok 0</text>
+  <rect x="260" y="14" width="150" height="38" rx="6" fill="#5b8def" opacity=".85"/><text x="335" y="38" fill="#fff">tok 4</text>
+  <rect x="430" y="14" width="150" height="38" rx="6" fill="#5b8def" opacity=".85"/><text x="505" y="38" fill="#fff">tok 8</text>
+  <rect x="600" y="14" width="150" height="38" rx="6" fill="#5b8def" opacity=".85"/><text x="675" y="38" fill="#fff">tok 12</text>
+  <!-- rank1 1,5,9,13 -->
+  <rect x="90"  y="64" width="150" height="38" rx="6" fill="#e2725b" opacity=".85"/><text x="165" y="88" fill="#fff">tok 1</text>
+  <rect x="260" y="64" width="150" height="38" rx="6" fill="#e2725b" opacity=".85"/><text x="335" y="88" fill="#fff">tok 5</text>
+  <rect x="430" y="64" width="150" height="38" rx="6" fill="#e2725b" opacity=".85"/><text x="505" y="88" fill="#fff">tok 9</text>
+  <rect x="600" y="64" width="150" height="38" rx="6" fill="#e2725b" opacity=".85"/><text x="675" y="88" fill="#fff">tok 13</text>
+  <!-- rank2 2,6,10,14 -->
+  <rect x="90"  y="114" width="150" height="38" rx="6" fill="#46b18b" opacity=".85"/><text x="165" y="138" fill="#fff">tok 2</text>
+  <rect x="260" y="114" width="150" height="38" rx="6" fill="#46b18b" opacity=".85"/><text x="335" y="138" fill="#fff">tok 6</text>
+  <rect x="430" y="114" width="150" height="38" rx="6" fill="#46b18b" opacity=".85"/><text x="505" y="138" fill="#fff">tok 10</text>
+  <rect x="600" y="114" width="150" height="38" rx="6" fill="#46b18b" opacity=".85"/><text x="675" y="138" fill="#fff">tok 14</text>
+  <!-- rank3 3,7,11,15 -->
+  <rect x="90"  y="164" width="150" height="38" rx="6" fill="#b58cf0" opacity=".85"/><text x="165" y="188" fill="#fff">tok 3</text>
+  <rect x="260" y="164" width="150" height="38" rx="6" fill="#b58cf0" opacity=".85"/><text x="335" y="188" fill="#fff">tok 7</text>
+  <rect x="430" y="164" width="150" height="38" rx="6" fill="#b58cf0" opacity=".85"/><text x="505" y="188" fill="#fff">tok 11</text>
+  <rect x="600" y="164" width="150" height="38" rx="6" fill="#b58cf0" opacity=".85"/><text x="675" y="188" fill="#fff">tok 15</text>
+  </g>
+</svg>
+<figcaption>local slot = pos // 4. The KV cache for "future" tokens is naturally balanced as the
+sequence grows one token at a time.</figcaption>
+</figure>
+
+<!-- ===== interleave = block_size ===== -->
+<h3 id="interleave-b">Mode B &mdash; <code>interleave_size = block_size</code> (block-level)</h3>
+<p>Same 16 positions, but now <code>owner = (pos // 4) % 4</code>. Consecutive runs of 4 tokens go to
+the same rank, filling that rank's block completely before advancing:</p>
+
+<figure>
+<svg viewBox="0 0 880 120" width="100%" font-family="var(--mono),monospace">
+  <g font-size="13" text-anchor="middle">
+    <text x="20" y="20" fill="#9aa3b2" font-size="11" text-anchor="start">global pos &rarr;</text>
+    <!-- 0-3 r0 -->
+    <rect x="20"  y="32" width="50" height="50" rx="6" fill="#5b8def" opacity="0.85"/><text x="45"  y="62" fill="#fff">0</text>
+    <rect x="72"  y="32" width="50" height="50" rx="6" fill="#5b8def" opacity="0.85"/><text x="97"  y="62" fill="#fff">1</text>
+    <rect x="124" y="32" width="50" height="50" rx="6" fill="#5b8def" opacity="0.85"/><text x="149" y="62" fill="#fff">2</text>
+    <rect x="176" y="32" width="50" height="50" rx="6" fill="#5b8def" opacity="0.85"/><text x="201" y="62" fill="#fff">3</text>
+    <!-- 4-7 r1 -->
+    <rect x="228" y="32" width="50" height="50" rx="6" fill="#e2725b" opacity="0.85"/><text x="253" y="62" fill="#fff">4</text>
+    <rect x="280" y="32" width="50" height="50" rx="6" fill="#e2725b" opacity="0.85"/><text x="305" y="62" fill="#fff">5</text>
+    <rect x="332" y="32" width="50" height="50" rx="6" fill="#e2725b" opacity="0.85"/><text x="357" y="62" fill="#fff">6</text>
+    <rect x="384" y="32" width="50" height="50" rx="6" fill="#e2725b" opacity="0.85"/><text x="409" y="62" fill="#fff">7</text>
+    <!-- 8-11 r2 -->
+    <rect x="436" y="32" width="50" height="50" rx="6" fill="#46b18b" opacity="0.85"/><text x="461" y="62" fill="#fff">8</text>
+    <rect x="488" y="32" width="50" height="50" rx="6" fill="#46b18b" opacity="0.85"/><text x="513" y="62" fill="#fff">9</text>
+    <rect x="540" y="32" width="50" height="50" rx="6" fill="#46b18b" opacity="0.85"/><text x="565" y="62" fill="#fff">10</text>
+    <rect x="592" y="32" width="50" height="50" rx="6" fill="#46b18b" opacity="0.85"/><text x="617" y="62" fill="#fff">11</text>
+    <!-- 12-15 r3 -->
+    <rect x="644" y="32" width="50" height="50" rx="6" fill="#b58cf0" opacity="0.85"/><text x="669" y="62" fill="#fff">12</text>
+    <rect x="696" y="32" width="50" height="50" rx="6" fill="#b58cf0" opacity="0.85"/><text x="721" y="62" fill="#fff">13</text>
+    <rect x="748" y="32" width="50" height="50" rx="6" fill="#b58cf0" opacity="0.85"/><text x="773" y="62" fill="#fff">14</text>
+    <rect x="800" y="32" width="50" height="50" rx="6" fill="#b58cf0" opacity="0.85"/><text x="825" y="62" fill="#fff">15</text>
+  </g>
+  <text x="20" y="105" fill="#9aa3b2" font-size="11">owner = (pos // 4) % 4 &nbsp;&middot;&nbsp; contiguous tokens stay co-located on one rank</text>
+</svg>
+<figcaption>A short sequence of, say, 5 tokens would land entirely on rank 0 (4 tokens) + rank 1
+(1 token) &mdash; less balanced than Mode A, but contiguous in physical memory.</figcaption>
+</figure>
+
+<div class="grid2">
+  <div class="callout ok" style="margin-top:6px">
+  <strong>interleave = 1 favours balance.</strong> Every rank gets near-equal KV regardless of
+  sequence length &mdash; ideal for many short/odd-length requests and even compute across ranks.
+  </div>
+  <div class="callout warn" style="margin-top:6px">
+  <strong>interleave = block_size favours locality.</strong> Contiguous tokens sit together, which
+  can simplify some attention kernels / reduce fragmentation, at the cost of load imbalance for
+  short sequences. Required &gt; 1 only with specific backend support (e.g. some MTP paths).
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="kernel">5. The slot-mapping kernel</h2>
+<span class="filepath">vllm/v1/worker/block_table.py:325 &middot; <code>_compute_slot_mapping_kernel</code> (Triton)</span>
+
+<p>This is where the formula actually runs. For every token position <code>pos</code> in the batch,
+the kernel computes (a) which rank owns it and (b) where in that rank's physical KV cache it goes.
+Tokens not owned by the local rank are written as <code>PAD_ID</code> (skipped).</p>
+
+<pre><span class="cm"># total_cp_world_size = pcp_world_size * dcp_world_size</span>
+<span class="cm"># total_cp_rank      = pcp_rank * dcp_world_size + dcp_rank</span>
+virtual_block_size = block_size * TOTAL_CP_WORLD_SIZE        <span class="cm"># 4 * 4 = 16</span>
+
+block_indices  = pos // virtual_block_size                  <span class="cm"># which virtual block</span>
+block_numbers  = block_table[req, block_indices]            <span class="cm"># physical block id</span>
+
+virtual_block_offsets = pos - block_indices * virtual_block_size
+
+<span class="cm"># (a) does THIS rank own the token?</span>
+is_local = (virtual_block_offsets // CP_KV_CACHE_INTERLEAVE_SIZE) \
+              % TOTAL_CP_WORLD_SIZE == TOTAL_CP_RANK
+
+<span class="cm"># (b) local slot within this rank's physical block</span>
+local_block_offsets = (
+    virtual_block_offsets // (TOTAL_CP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE)
+) * CP_KV_CACHE_INTERLEAVE_SIZE + (
+    virtual_block_offsets % CP_KV_CACHE_INTERLEAVE_SIZE
+)
+
+slot_ids = block_numbers * block_size + local_block_offsets
+slot_ids = where(is_local, slot_ids, PAD_ID)               <span class="cm"># skip non-owned tokens</span></pre>
+
+<h4>Worked trace &mdash; token <code>pos = 9</code>, <code>interleave = 1</code>, CP = 4, block_size = 4</h4>
+<table>
+<tbody>
+<tr><td><code>virtual_block_size</code></td><td><code>4 &times; 4 = 16</code></td></tr>
+<tr><td><code>block_indices</code></td><td><code>9 // 16 = 0</code></td></tr>
+<tr><td><code>virtual_block_offsets</code></td><td><code>9 - 0 = 9</code></td></tr>
+<tr><td>owner rank</td><td><code>(9 // 1) % 4 = 1</code> &rarr; only <strong>rank 1</strong> stores it</td></tr>
+<tr><td><code>local_block_offsets</code> (on rank 1)</td><td><code>(9 // 4)&times;1 + (9 % 1) = 2</code></td></tr>
+</tbody>
+</table>
+<p class="muted">&rArr; token 9 is the 3rd token (slot 2) in rank 1's block &mdash; matching the
+Mode A diagram above (rank 1 holds tok 1, 5, <strong>9</strong>, 13).</p>
+
+<h4>Same token with <code>interleave = 4</code> (= block_size)</h4>
+<table>
+<tbody>
+<tr><td>owner rank</td><td><code>(9 // 4) % 4 = 2</code> &rarr; <strong>rank 2</strong></td></tr>
+<tr><td><code>local_block_offsets</code></td><td><code>(9 // 16)&times;4 + (9 % 4) = 0 + 1 = 1</code></td></tr>
+</tbody>
+</table>
+<p class="muted">&rArr; token 9 is slot 1 in rank 2's block &mdash; matching the Mode B diagram
+(rank 2 holds tok 8, <strong>9</strong>, 10, 11).</p>
+
+<!-- ============================================================ -->
+<h2 id="seqlens">6. Per-rank sequence lengths during attention</h2>
+<span class="filepath">vllm/v1/attention/backends/utils.py:862 &middot; <code>get_dcp_local_seq_lens()</code></span>
+
+<p>Because tokens are spread unevenly when a sequence length isn't a multiple of
+<code>CP &times; interleave</code>, each rank may hold a slightly different number of KV tokens. The
+attention backend needs the exact local count per rank to size its work. That's this helper:</p>
+
+<pre><span class="kw">base</span> = (seq_len // interleave // dcp_size) * interleave
+remainder = seq_len - base * dcp_size
+remainder = clip(remainder - rank * interleave, 0, interleave)
+local_seq_len = base + remainder</pre>
+
+<p>Intuition: <code>base</code> is the evenly-divisible part every rank gets; the leftover
+<code>remainder</code> tokens form one last partial round, handed out <code>interleave</code> tokens
+at a time to the lowest ranks first.</p>
+
+<h4>Example &mdash; seq_len = 22, dcp_size = 4, interleave = 1</h4>
+<table>
+<thead><tr><th>rank</th><th>base</th><th>remainder share</th><th>local_seq_len</th></tr></thead>
+<tbody>
+<tr><td>0</td><td>5</td><td>1</td><td><strong>6</strong></td></tr>
+<tr><td>1</td><td>5</td><td>1</td><td><strong>6</strong></td></tr>
+<tr><td>2</td><td>5</td><td>0</td><td><strong>5</strong></td></tr>
+<tr><td>3</td><td>5</td><td>0</td><td><strong>5</strong></td></tr>
+</tbody>
+</table>
+<p class="muted"><code>base = (22//1//4)*1 = 5</code>; total remainder <code>= 22 - 5&times;4 = 2</code>,
+given to ranks 0 and 1. Sum = 6+6+5+5 = 22. ✓ The backend also derives the max workspace as
+<code>ceil(seq_len / (dcp_size&times;interleave)) &times; interleave</code>
+(see <code>flash_attn.py</code> / <code>mla_attention.py</code>).</p>
+
+<!-- ============================================================ -->
+<h2 id="config">7. Config, defaults &amp; validation</h2>
+
+<table>
+<thead><tr><th>Field</th><th>Default</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td><code>decode_context_parallel_size</code> (<code>-dcp</code>)</td><td>1</td>
+  <td>Reuses TP GPUs; <code>tp_size % dcp_size == 0</code>; range <code>[1, tp_size/H]</code>.</td></tr>
+<tr><td><code>prefill_context_parallel_size</code></td><td>1</td>
+  <td>PCP groups (under development).</td></tr>
+<tr><td><code>cp_kv_cache_interleave_size</code></td><td>1</td>
+  <td>The interleave granularity. Applies to DCP <em>and</em> PCP.</td></tr>
+<tr><td><code>dcp_kv_cache_interleave_size</code></td><td>1</td>
+  <td><span class="tag">deprecated</span> superseded by <code>cp_kv_cache_interleave_size</code>;
+  to be removed once PCP is fully supported.</td></tr>
+<tr><td><code>dcp_comm_backend</code></td><td><code>"ag_rs"</code></td>
+  <td>AllGather+ReduceScatter, or <code>"a2a"</code> (all-to-all, fewer NCCL calls for MLA).</td></tr>
+</tbody>
+</table>
+
+<h4>Validation (enforced at startup)</h4>
+<span class="filepath">vllm/config/vllm.py:2143</span>
+<pre>assert (interleave &lt;= block_size) and (block_size % interleave == 0), \
+    "Block_size should be &gt;= and divisible by cp_kv_cache_interleave_size"</pre>
+<p class="muted">So <code>cp_kv_cache_interleave_size</code> ∈ {divisors of <code>block_size</code> that are
+≤ <code>block_size</code>}. With <code>block_size = 16</code>: valid values are 1, 2, 4, 8, 16.</p>
+
+<div class="callout warn">
+Compatibility is also checked in <code>vllm/v1/worker/cp_utils.py</code>: DCP requires attention
+backends that return <strong>LSE</strong> (log-sum-exp) so partial attention outputs can be combined
+across ranks; speculative decoding (MTP) with <code>interleave &gt; 1</code> needs special support.
+</div>
+
+<!-- ============================================================ -->
+<h2 id="cheat">8. Cheat sheet</h2>
+<div class="panel">
+<table style="margin:0">
+<tbody>
+<tr><td>Shard along</td><td>token / sequence dimension <code>T</code> of one request</td></tr>
+<tr><td>PCP</td><td>splits long <em>prefill</em> Q/K/V across GPUs &rarr; lower TTFT</td></tr>
+<tr><td>DCP</td><td>shards growing <em>decode</em> KV cache across GPUs &rarr; less duplication, bigger batch</td></tr>
+<tr><td>Unified rank</td><td><code>total_cp_rank = pcp_rank&times;dcp_size + dcp_rank</code></td></tr>
+<tr><td>Owner of token</td><td><code>(offset // interleave) % total_cp_world_size</code></td></tr>
+<tr><td>interleave = 1</td><td>token round-robin &mdash; best balance (default)</td></tr>
+<tr><td>interleave = block_size</td><td>block-level &mdash; contiguous, less balanced</td></tr>
+<tr><td>Constraint</td><td><code>interleave</code> divides <code>block_size</code>, <code>interleave ≤ block_size</code></td></tr>
+<tr><td>Try first</td><td>raise <code>-tp</code> until perf is OK, then add <code>-dcp</code> to kill KV duplication</td></tr>
+</tbody>
+</table>
+</div>
+
+<hr>
+<p class="muted" style="font-size:.85rem">
+Sources in-repo: <code>vllm/config/parallel.py</code>,
+<code>vllm/v1/worker/block_table.py</code>,
+<code>vllm/v1/attention/backends/utils.py</code>,
+<code>vllm/config/vllm.py</code>,
+<code>vllm/v1/worker/cp_utils.py</code>,
+<code>docs/serving/context_parallel_deployment.md</code>.
+External: <a href="http://arxiv.org/abs/2507.07120">arxiv 2507.07120</a> (interleaved KV sharding),
+<a href="http://arxiv.org/abs/2310.01889">ring attention</a>.
+</p>
+
+</div>
+</body>
+</html>

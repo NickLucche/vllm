@@ -52,6 +52,7 @@ def _make_request(
     is_d_side: bool = True,
     remote_engine_id: str = "prefill-engine",
     remote_request_id: str | None = None,
+    push_request_id: str | None = None,
     remote_host: str = "10.0.0.1",
     remote_port: int = 5601,
     tp_size: int = 1,
@@ -64,6 +65,10 @@ def _make_request(
     req.request_id = request_id
     req.num_computed_tokens = 64
 
+    # Proxy-coordinated key shared by P and D; decoupled from each engine's
+    # internal request_id.
+    push_id = push_request_id or f"push-{request_id}"
+
     if is_d_side:
         # D-side request: do_remote_prefill=True -> prefill on a remote P.
         params: dict[str, Any] = {
@@ -71,6 +76,7 @@ def _make_request(
             "do_remote_decode": False,
             "remote_engine_id": remote_engine_id,
             "remote_request_id": remote_request_id or f"prefill-{request_id}",
+            "push_request_id": push_id,
             "remote_host": remote_host,
             "remote_port": remote_port,
             "tp_size": tp_size,
@@ -80,6 +86,7 @@ def _make_request(
         params = {
             "do_remote_prefill": False,
             "do_remote_decode": True,
+            "push_request_id": push_id,
         }
     req.kv_transfer_params = params
     req.status = (
@@ -124,6 +131,8 @@ class TestPushScheduler:
         reg = sched._push_pending_registrations[request.request_id]
         # ``request_id`` is D's own vLLM request id; plus our own (D) coords.
         assert reg["request_id"] == request.request_id
+        # ``push_request_id`` is the proxy-coordinated key carried to P.
+        assert reg["push_request_id"] == request.kv_transfer_params["push_request_id"]
         assert reg["decode_engine_id"] == sched.engine_id
         assert reg["decode_host"] == sched.side_channel_host
         assert reg["decode_port"] == sched.side_channel_port
@@ -139,12 +148,15 @@ class TestPushScheduler:
         assert request.request_id in sched._reqs_need_recv
 
     def test_p_side_request_finished_stages_blocks(self):
-        """P scheduler pushes blocks into both _finished_request_blocks (lease)
-        and _newly_finished_push_blocks (metadata for next step)."""
+        """P scheduler pushes blocks into _finished_request_blocks (lease,
+        keyed by P's internal id) and _newly_finished_push_blocks (metadata
+        for next step, keyed by the shared push_request_id)."""
         sched = make_nixl_push_scheduler()
         _stub_sw_clipping(sched)
 
-        request = _make_request(request_id="req-p-1", is_d_side=False)
+        request = _make_request(
+            request_id="req-p-1", is_d_side=False, push_request_id="push-p-1"
+        )
         block_ids = ([20, 21, 22, 23],)
 
         delay, ret_params = sched.request_finished(request, block_ids)
@@ -153,9 +165,15 @@ class TestPushScheduler:
         assert ret_params is not None
         assert ret_params["do_remote_prefill"] is True
         assert ret_params["do_remote_decode"] is False
+        # Lease keyed by P's internal id.
         assert request.request_id in sched._finished_request_blocks
-        assert request.request_id in sched._newly_finished_push_blocks
         assert request.request_id in sched._reqs_need_send  # lease armed
+        # Matching entry keyed by push_request_id, carrying P's internal id.
+        assert "push-p-1" in sched._newly_finished_push_blocks
+        assert sched._newly_finished_push_blocks["push-p-1"] == (
+            request.request_id,
+            block_ids,
+        )
 
     def test_build_connector_meta_drains_both_sides(self):
         """meta.push_registrations and meta.push_finished_blocks are filled
@@ -168,7 +186,9 @@ class TestPushScheduler:
         sched.update_state_after_alloc(
             d_req, _BlocksMock(([1, 2, 3],)), num_external_tokens=48
         )
-        p_req = _make_request(request_id="req-p-9", is_d_side=False)
+        p_req = _make_request(
+            request_id="req-p-9", is_d_side=False, push_request_id="push-p-9"
+        )
         sched.request_finished(p_req, ([4, 5, 6],))
 
         scheduler_output = MagicMock()
@@ -188,7 +208,8 @@ class TestPushScheduler:
 
         assert isinstance(meta, NixlConnectorMetadata)
         assert "req-d-9" in meta.push_registrations
-        assert "req-p-9" in meta.push_finished_blocks
+        # Finished blocks keyed by push_request_id.
+        assert "push-p-9" in meta.push_finished_blocks
         # Staging dicts cleared.
         assert sched._push_pending_registrations == {}
         assert sched._newly_finished_push_blocks == {}
@@ -311,6 +332,8 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._sending_transfers_lock = threading.Lock()
         w._push_finished_blocks = {}
         w._pending_d_registrations = {}
+        w._push_to_internal = {}
+        w._internal_to_push = {}
         w._reg_send_inbox = queue.Queue()
         w._finished_blocks_inbox = queue.Queue()
         w._pending_completion_notifs = queue.Queue()
@@ -348,6 +371,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
 def _registration_data(
     request_id: str,
     *,
+    push_request_id: str | None = None,
     decode_engine_id: str = "decode-engine",
     decode_host: str = "10.0.0.2",
     decode_port: int = 5602,
@@ -359,7 +383,10 @@ def _registration_data(
     remote_tp_size: int = 1,
 ) -> dict[str, Any]:
     return {
+        # D's own internal request_id (echoed back by P in the completion
+        # notif); ``push_request_id`` is the shared matching key.
         "request_id": request_id,
+        "push_request_id": push_request_id or request_id,
         "decode_engine_id": decode_engine_id,
         "decode_host": decode_host,
         "decode_port": decode_port,
@@ -374,36 +401,44 @@ def _registration_data(
 
 class TestPushWriterMatching:
     def test_handle_push_reg_matches_existing_finished_blocks(self):
-        """PUSH_REG arrives second (P finished first): match + fire."""
+        """PUSH_REG arrives second (P finished first): match by push_request_id
+        + fire. P and D use *different* internal ids; only the shared
+        push_request_id lines them up."""
         w = _StubWriterWorker.fresh()
-        # P had already finished; its blocks were stashed via metadata.
-        w._push_finished_blocks["req-A"] = ([200, 201, 202],)
+        # P had already finished; its blocks were stashed via metadata, keyed
+        # by push_request_id with P's internal id carried in the value.
+        w._push_finished_blocks["push-1"] = ("p-internal-A", ([200, 201, 202],))
 
+        # D's registration carries D's own internal id + the shared push id.
         notif = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(
-            _registration_data("req-A")
+            _registration_data("d-internal-A", push_request_id="push-1")
         )
         w._handle_push_reg_notif(notif)
 
         assert len(w.start_push_calls) == 1
         rid, blocks, reg = w.start_push_calls[0]
-        assert rid == "req-A"
+        # The WRITE is tracked under P's internal id (lease / completion).
+        assert rid == "p-internal-A"
         assert blocks == ([200, 201, 202],)
+        # The completion notif goes back to D using D's internal id.
+        assert reg["request_id"] == "d-internal-A"
         assert reg["decode_engine_id"] == "decode-engine"
         # Finished blocks consumed.
-        assert "req-A" not in w._push_finished_blocks
+        assert "push-1" not in w._push_finished_blocks
         assert w._pending_d_registrations == {}
 
     def test_handle_push_reg_stashes_when_no_finished_blocks_yet(self):
-        """PUSH_REG arrives first (D registered first): stash, no fire."""
+        """PUSH_REG arrives first (D registered first): stash by
+        push_request_id, no fire."""
         w = _StubWriterWorker.fresh()
 
         notif = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(
-            _registration_data("req-B")
+            _registration_data("d-internal-B", push_request_id="push-B")
         )
         w._handle_push_reg_notif(notif)
 
         assert len(w.start_push_calls) == 0
-        assert "req-B" in w._pending_d_registrations
+        assert "push-B" in w._pending_d_registrations
 
     def test_handle_push_reg_drops_malformed(self, caplog):
         # The writer logs WARNING/ERROR when it sees these bad payloads;
@@ -414,7 +449,7 @@ class TestPushWriterMatching:
             logger=("vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker"),
         )
         w = _StubWriterWorker.fresh()
-        # Missing request_id -> should drop without raising.
+        # Missing push_request_id -> should drop without raising.
         bad = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode({"decode_engine_id": "x"})
         w._handle_push_reg_notif(bad)
         assert w._pending_d_registrations == {}
@@ -428,28 +463,33 @@ class TestPushWriterMatching:
 class TestPushWriterStartLoadKv:
     def test_finished_blocks_inbox_matches_stashed_registration(self):
         """Run the writer-loop's finished-blocks drain against a
-        pre-populated _pending_d_registrations entry."""
+        pre-populated _pending_d_registrations entry, matching by
+        push_request_id."""
         w = _StubWriterWorker.fresh()
-        w._pending_d_registrations["req-C"] = _registration_data("req-C")
+        w._pending_d_registrations["push-C"] = _registration_data(
+            "d-internal-C", push_request_id="push-C"
+        )
 
-        # Simulate start_load_kv enqueuing finished blocks.
-        w._finished_blocks_inbox.put(("req-C", ([10, 11, 12],)))
+        # Simulate start_load_kv enqueuing finished blocks:
+        # (push_request_id, p_internal_id, blocks).
+        w._finished_blocks_inbox.put(("push-C", "p-internal-C", ([10, 11, 12],)))
 
         # Drain like the writer loop does.
         while True:
             try:
-                rid, blocks = w._finished_blocks_inbox.get_nowait()
+                push_id, internal_id, blocks = w._finished_blocks_inbox.get_nowait()
             except queue.Empty:
                 break
-            matched = w._pop_matching_registration(rid)
+            matched = w._pop_matching_registration(push_id)
             if matched is not None:
-                w._do_start_push_kv(rid, blocks, matched)
+                w._do_start_push_kv(internal_id, blocks, matched)
             else:
-                w._push_finished_blocks[rid] = blocks
+                w._push_finished_blocks[push_id] = (internal_id, blocks)
 
         assert len(w.start_push_calls) == 1
-        assert w.start_push_calls[0][0] == "req-C"
-        assert "req-C" not in w._pending_d_registrations
+        # WRITE tracked under P's internal id.
+        assert w.start_push_calls[0][0] == "p-internal-C"
+        assert "push-C" not in w._pending_d_registrations
 
     def test_start_load_kv_enqueues_to_writer(self):
         """``start_load_kv`` should hand registrations + finished blocks
@@ -465,8 +505,9 @@ class TestPushWriterStartLoadKv:
         meta.push_registrations = {
             "req-D": _registration_data("req-D"),
         }
+        # push_finished_blocks: push_request_id -> (p_internal_id, blocks).
         meta.push_finished_blocks = {
-            "req-E": ([5, 6, 7],),
+            "push-E": ("p-internal-E", ([5, 6, 7],)),
         }
 
         w.start_load_kv(meta)
@@ -476,6 +517,9 @@ class TestPushWriterStartLoadKv:
         assert w._finished_blocks_inbox.qsize() == 1
         assert w._push_writer_wake.is_set()
         assert w.start_push_calls == []
+        # Translation maps populated for heartbeat renewal + eviction.
+        assert w._push_to_internal == {"push-E": "p-internal-E"}
+        assert w._internal_to_push == {"p-internal-E": "push-E"}
 
 
 class TestPushWriterNotifs:
@@ -502,28 +546,32 @@ class TestPushWriterNotifs:
         assert request_id in w._recving_transfers
 
     def test_get_finished_evicts_completed_state(self):
-        """``get_finished`` should enqueue evictions and wake the writer."""
+        """``get_finished`` should enqueue evictions (translated from P's
+        internal id to push_request_id) and wake the writer."""
         w = _StubWriterWorker.fresh()
+        # P internal id -> push_request_id mapping (set when finished blocks
+        # were ingested). Eviction must be enqueued under push_request_id.
+        w._internal_to_push["p-internal-done"] = "push-done"
 
         # Stub the base ``get_finished`` to return one done_sending entry.
         # Patch via the MRO's parent class.
         with patch.object(
             NixlPushConnectorWorker.__mro__[1],
             "get_finished",
-            return_value=({"req-done"}, set()),
+            return_value=({"p-internal-done"}, set()),
         ):
             done_sending, done_recving = w.get_finished()
 
-        assert "req-done" in done_sending
+        assert "p-internal-done" in done_sending
         assert done_recving == set()
-        # Eviction enqueued for the writer.
+        # Eviction enqueued for the writer, keyed by push_request_id.
         evicted = []
         while True:
             try:
                 evicted.append(w._evict_finished_inbox.get_nowait())
             except queue.Empty:
                 break
-        assert evicted == ["req-done"]
+        assert evicted == ["push-done"]
         assert w._push_writer_wake.is_set()
 
 
@@ -651,8 +699,8 @@ class TestPushWriterNegative:
         assert w._pending_d_registrations == {}
         assert w.start_push_calls == []
 
-    def test_handle_push_reg_with_non_string_request_id_is_dropped(self, caplog):
-        """request_id must be a str; integers, None, etc. must drop."""
+    def test_handle_push_reg_with_non_string_push_request_id_is_dropped(self, caplog):
+        """push_request_id must be a str; integers, None, etc. must drop."""
         caplog.set_level(
             logging.CRITICAL,
             logger=("vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker"),
@@ -660,7 +708,7 @@ class TestPushWriterNegative:
         w = _StubWriterWorker.fresh()
         for bogus_rid in (123, None, 4.5, b"bytes-not-str"):
             payload = _registration_data("placeholder")
-            payload["request_id"] = bogus_rid  # type: ignore[assignment]
+            payload["push_request_id"] = bogus_rid  # type: ignore[assignment]
             notif = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(payload)
             w._handle_push_reg_notif(notif)
         assert w._pending_d_registrations == {}
@@ -779,3 +827,23 @@ class TestPushWriterNegative:
             assert w._reqs_to_send[rid] >= now
         # Unknown request must not be inserted by the heartbeat path.
         assert "req-unknown" not in w._reqs_to_send
+
+    def test_heartbeat_translates_push_request_id_to_internal_id(self):
+        """In push mode D heartbeats by push_request_id; the push worker must
+        translate it to P's internal id (the lease key) before renewing."""
+        w = _StubWriterWorker.fresh()
+        w.transfer_topo = MagicMock()
+        w._lease_extension = 10
+
+        # Lease is keyed by P's internal id; D only knows push_request_id.
+        old_expiry = time.perf_counter() - 5.0
+        w._reqs_to_send["p-internal"] = old_expiry
+        w._push_to_internal["push-x"] = "p-internal"
+
+        w._pending_completion_notifs.put(b"HB:push-x")
+        w._get_new_notifs()
+
+        # The internal-id lease was renewed via the push_request_id mapping.
+        assert w._reqs_to_send["p-internal"] > old_expiry
+        # The push_request_id itself must not leak into the lease dict.
+        assert "push-x" not in w._reqs_to_send

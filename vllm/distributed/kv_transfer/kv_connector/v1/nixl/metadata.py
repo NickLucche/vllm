@@ -39,8 +39,10 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   2: Add remote_request_id to kv_transfer_params
 #   3: Add physical_blocks_per_logical_kv_block to NixlAgentMetadata
 #   4: Add KV block lease renewal through heartbeats
+#   5: Push mode coordinates via dedicated push_request_id;
+#      remote_request_id is no longer used for push matching.
 #
-NIXL_CONNECTOR_VERSION: int = 4
+NIXL_CONNECTOR_VERSION: int = 5
 
 
 @dataclass
@@ -182,8 +184,11 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         # P workers via NIXL notification on this step.
         self.push_registrations: dict[ReqId, dict[str, Any]] = {}
         # Push mode (P side): newly finished request blocks to be matched
-        # against pending D registrations on the P worker.
-        self.push_finished_blocks: dict[ReqId, BlockIds] = {}
+        # against pending D registrations on the P worker. Keyed by the
+        # proxy-coordinated ``push_request_id``; the value carries P's own
+        # internal request_id (for lease / WRITE-completion accounting)
+        # alongside the finished block IDs.
+        self.push_finished_blocks: dict[ReqId, tuple[ReqId, BlockIds]] = {}
 
     def _add_new_req(
         self,

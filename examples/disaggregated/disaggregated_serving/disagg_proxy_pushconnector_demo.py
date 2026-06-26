@@ -208,9 +208,14 @@ class PushProxy:
         ``remote_block_ids`` is intentionally omitted: D allocates its
         own blocks and registers them with P; P determines the
         prefill-side block IDs and ships them via the WRITE.
+
+        ``push_request_id`` is the proxy-coordinated key both P and D use to
+        match the WRITE. It is independent of each engine's (randomized)
+        internal request ID, so it must NOT be confused with pull-mode's
+        ``remote_request_id`` (which is P's internal request ID).
         """
         params = self.push_metadata.copy()
-        params["remote_request_id"] = request_id
+        params["push_request_id"] = request_id
         return params
 
     def _common_headers(self, request_id: str) -> dict:
@@ -245,6 +250,9 @@ class PushProxy:
             "remote_block_ids": None,
             "remote_host": None,
             "remote_port": None,
+            # Coordination key shared with the decode leg below; P matches
+            # its finished prefill blocks to D's registration by this id.
+            "push_request_id": request_id,
         }
 
         # Decode leg (push mode: no remote_block_ids).

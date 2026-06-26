@@ -82,10 +82,14 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         self._push_registration_deadlines: dict[ReqId, float] = {}
 
         # P-side: block IDs for finished requests, kept for the lease and
-        # used to drive ``has_pending_push_work``.
+        # used to drive ``has_pending_push_work``. Keyed by P's own internal
+        # request_id (matches ``finished_sending`` for cleanup).
         self._finished_request_blocks: dict[ReqId, BlockIds] = {}
         # P-side: newly finished blocks to ship to P workers on next step.
-        self._newly_finished_push_blocks: dict[ReqId, BlockIds] = {}
+        # Keyed by the proxy-coordinated ``push_request_id``; the value
+        # carries P's internal request_id so the worker can track the WRITE
+        # completion / lease under P's own id.
+        self._newly_finished_push_blocks: dict[ReqId, tuple[ReqId, BlockIds]] = {}
 
         # Soft watchdog timeout (seconds) for D-side registrations that
         # never receive a push completion. Defaults to the existing
@@ -175,8 +179,13 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # ``remote_*`` fields are P's coordinates (from D's perspective).
         # ``decode_*`` fields are D's own info that P needs for the
         # reverse handshake before WRITE-ing.
+        # ``push_request_id`` is the proxy-coordinated key P matches against
+        # its finished prefill blocks; ``request_id`` is D's own internal id,
+        # which P echoes back in the completion notif (see push_worker
+        # ``_do_start_push_kv``).
         self._push_pending_registrations[request.request_id] = {
             "request_id": request.request_id,
+            "push_request_id": params["push_request_id"],
             "decode_engine_id": self.engine_id,
             "decode_host": self.side_channel_host,
             "decode_port": self.side_channel_port,
@@ -198,6 +207,10 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # ReqMeta without a KeyError — the actual remote block IDs are
         # learned by P over the NIXL handshake at WRITE time.
         params["remote_block_ids"] = ()
+        # ``remote_request_id`` is unused in push mode (P drives the WRITE and
+        # notifies D by D's own internal id), but ``add_new_req_to_recv``
+        # requires the key; seed it with D's own id as a harmless placeholder.
+        params.setdefault("remote_request_id", request.request_id)
         self._reqs_need_recv[request.request_id] = (request, local_block_ids)
 
         # Mark as processed so a re-entry (e.g. preemption + reschedule)
@@ -272,9 +285,15 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             remote_num_tokens = request.num_computed_tokens
 
             # Store finished blocks for worker-level matching with D
-            # registrations (via NIXL notifications).
+            # registrations (via NIXL notifications). The matching key is the
+            # proxy-coordinated ``push_request_id`` (shared with D), while the
+            # lease / cleanup stays keyed by P's own internal request_id.
+            push_request_id = params["push_request_id"]
             self._finished_request_blocks[request.request_id] = block_ids
-            self._newly_finished_push_blocks[request.request_id] = block_ids
+            self._newly_finished_push_blocks[push_request_id] = (
+                request.request_id,
+                block_ids,
+            )
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,

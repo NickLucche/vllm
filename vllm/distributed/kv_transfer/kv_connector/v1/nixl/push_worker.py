@@ -87,21 +87,34 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
         self._sending_transfers_lock = threading.Lock()
 
-        # Writer-thread owned matching state.
+        # Writer-thread owned matching state. Both dicts are keyed by the
+        # proxy-coordinated ``push_request_id`` (shared by P and D), which is
+        # decoupled from either engine's randomized internal request_id.
         # P-side: finished request blocks received from scheduler metadata
         # that have not yet been matched with an incoming D registration.
-        self._push_finished_blocks: dict[ReqId, BlockIds] = {}
+        # Value carries P's internal request_id (for WRITE/lease accounting).
+        self._push_finished_blocks: dict[ReqId, tuple[ReqId, BlockIds]] = {}
         # P-side: D registrations received via NIXL notification that have
         # not yet been matched with a finished P request.
         self._pending_d_registrations: dict[ReqId, dict[str, Any]] = {}
+        # P-side translation between the push_request_id matching key and P's
+        # internal request_id: ``_push_to_internal`` drives heartbeat lease
+        # renewal (D heartbeats by push_request_id), ``_internal_to_push``
+        # translates ``done_sending`` (P internal ids) back for eviction.
+        self._push_to_internal: dict[ReqId, ReqId] = {}
+        self._internal_to_push: dict[ReqId, ReqId] = {}
 
         # Cross-thread channels.
         self._reg_send_inbox: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
-        self._finished_blocks_inbox: queue.Queue[tuple[str, BlockIds]] = queue.Queue()
+        # (push_request_id, p_internal_request_id, finished_block_ids)
+        self._finished_blocks_inbox: queue.Queue[tuple[str, str, BlockIds]] = (
+            queue.Queue()
+        )
         self._pending_completion_notifs: queue.Queue[bytes] = queue.Queue()
-        # Main thread → writer: req_ids whose lease has expired or whose
-        # WRITE has completed. Writer drops them from
-        # ``_push_finished_blocks`` so an unmatched entry doesn't keep the
+        # Main thread → writer: ``push_request_id``s whose lease has expired or
+        # whose WRITE has completed (translated from P internal ids in
+        # ``get_finished``). Writer drops them from ``_push_finished_blocks`` /
+        # ``_pending_d_registrations`` so an unmatched entry doesn't keep the
         # writer busy-polling forever.
         self._evict_finished_inbox: queue.Queue[str] = queue.Queue()
 
@@ -169,8 +182,17 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         # --- P-side: newly finished blocks awaiting a D registration match ---
         if metadata.push_finished_blocks:
-            for req_id, block_ids in metadata.push_finished_blocks.items():
-                self._finished_blocks_inbox.put((req_id, block_ids))
+            for push_id, (
+                internal_id,
+                block_ids,
+            ) in metadata.push_finished_blocks.items():
+                self._finished_blocks_inbox.put((push_id, internal_id, block_ids))
+                # Record the push_id <-> internal_id mapping so heartbeats
+                # (keyed by push_id) renew P's lease (keyed by internal_id),
+                # and so ``get_finished`` can translate completions back to
+                # push_id for eviction.
+                self._push_to_internal[push_id] = internal_id
+                self._internal_to_push[internal_id] = push_id
             self._push_writer_wake.set()
 
         # Batch + lease tracking (same as pull).
@@ -201,29 +223,36 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         break
                     self._send_registration_to_p(rid, rd)
 
-                # 2. P-side finished blocks; match against pending regs.
+                # 2. P-side finished blocks; match against pending regs by
+                # push_request_id.
                 while True:
                     try:
-                        rid, blocks = self._finished_blocks_inbox.get_nowait()
+                        push_id, internal_id, blocks = (
+                            self._finished_blocks_inbox.get_nowait()
+                        )
                     except queue.Empty:
                         break
-                    matched = self._pop_matching_registration(rid)
+                    matched = self._pop_matching_registration(push_id)
                     if matched is not None:
-                        self._do_start_push_kv(rid, blocks, matched)
+                        self._do_start_push_kv(internal_id, blocks, matched)
                     else:
-                        self._push_finished_blocks[rid] = blocks
+                        self._push_finished_blocks[push_id] = (internal_id, blocks)
 
                 # 2b. Evict finished blocks for requests that have either
                 # completed (WRITE acknowledged) or whose lease expired
                 # without a D registration.  Drop pending registrations
-                # for the same reason so we don't leak state.
+                # for the same reason so we don't leak state. Keyed by
+                # push_request_id (translated in ``get_finished``).
                 while True:
                     try:
-                        rid = self._evict_finished_inbox.get_nowait()
+                        push_id = self._evict_finished_inbox.get_nowait()
                     except queue.Empty:
                         break
-                    self._push_finished_blocks.pop(rid, None)
-                    self._pending_d_registrations.pop(rid, None)
+                    self._push_finished_blocks.pop(push_id, None)
+                    self._pending_d_registrations.pop(push_id, None)
+                    internal_id = self._push_to_internal.pop(push_id, None)
+                    if internal_id is not None:
+                        self._internal_to_push.pop(internal_id, None)
 
                 # 3. NIXL notifs: route PUSH_REG; forward the rest.
                 for notifs in self.nixl_wrapper.get_new_notifs().values():
@@ -250,17 +279,19 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         except Exception:
             logger.exception("Failed to decode PUSH_REG notification payload")
             return
-        rid = reg_data.get("request_id") if isinstance(reg_data, dict) else None
-        if not isinstance(rid, str):
-            logger.warning("PUSH_REG notif missing request_id; dropping")
+        push_id = (
+            reg_data.get("push_request_id") if isinstance(reg_data, dict) else None
+        )
+        if not isinstance(push_id, str):
+            logger.warning("PUSH_REG notif missing push_request_id; dropping")
             return
 
-        match = self._pop_matching_finished_blocks(rid)
+        match = self._pop_matching_finished_blocks(push_id)
         if match is not None:
-            fin_id, blocks = match
-            self._do_start_push_kv(fin_id, blocks, reg_data)
+            internal_id, blocks = match
+            self._do_start_push_kv(internal_id, blocks, reg_data)
         else:
-            self._pending_d_registrations[rid] = reg_data
+            self._pending_d_registrations[push_id] = reg_data
 
     # --- D-side registration send (writer thread) ---------------------- #
 
@@ -333,18 +364,18 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     # --- Matching helpers --------------------------------------------- #
 
-    def _pop_matching_registration(self, request_id: str) -> dict[str, Any] | None:
-        """Pop the D-side registration matching *request_id*."""
-        return self._pending_d_registrations.pop(request_id, None)
+    def _pop_matching_registration(self, push_id: str) -> dict[str, Any] | None:
+        """Pop the D-side registration matching *push_id*."""
+        return self._pending_d_registrations.pop(push_id, None)
 
     def _pop_matching_finished_blocks(
-        self, request_id: str
+        self, push_id: str
     ) -> tuple[str, BlockIds] | None:
-        """Pop the P-side finished blocks matching *request_id*."""
-        blocks = self._push_finished_blocks.pop(request_id, None)
-        if blocks is not None:
-            return request_id, blocks
-        return None
+        """Pop the P-side finished blocks matching *push_id*.
+
+        Returns ``(p_internal_request_id, block_ids)`` or ``None``.
+        """
+        return self._push_finished_blocks.pop(push_id, None)
 
     # --- WRITE transfer logic (writer thread) ------------------------- #
 
@@ -639,6 +670,20 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     # --- Notification handling on engine main thread ------------------ #
 
+    def _handle_heartbeat(self, payload: str) -> None:
+        """Translate push_request_id heartbeats to P's internal request_id.
+
+        In push mode D heartbeats reference the proxy-coordinated
+        ``push_request_id`` (it does not know P's randomized internal id);
+        map each back to P's internal id before the base worker renews the
+        lease, which is keyed by P's internal request_id. Unknown ids pass
+        through unchanged (no lease to renew -> no-op in the base handler).
+        """
+        translated = ",".join(
+            self._push_to_internal.get(rid, rid) for rid in payload.split(",")
+        )
+        super()._handle_heartbeat(translated)
+
     def _get_new_notifs(self) -> set[str]:
         """Drain HB / completion notifs forwarded by the writer thread.
 
@@ -713,9 +758,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         # Tell the writer to drop any state it still holds for any
         # request that just finished (push completed) or expired
-        # (lease ran out without a D registration ever arriving).
+        # (lease ran out without a D registration ever arriving). The
+        # writer keys its state by push_request_id, so translate from P's
+        # internal id; fall back to the id itself if no mapping exists.
         for req_id in done_sending:
-            self._evict_finished_inbox.put(req_id)
+            self._evict_finished_inbox.put(self._internal_to_push.get(req_id, req_id))
         if done_sending:
             self._push_writer_wake.set()
 

@@ -181,7 +181,13 @@ class NixlBaseConnectorScheduler:
             return
         # Only track if all required remote fields are present.
         remote_engine_id = params.get("remote_engine_id")
-        remote_request_id = params.get("remote_request_id")
+        # Heartbeats reference the request on P by its lease key. In pull mode
+        # that is P's internal id (``remote_request_id``); in push mode P keys
+        # its lease by the proxy-coordinated ``push_request_id`` (and the push
+        # worker translates it back to P's internal id on receipt).
+        remote_request_id = params.get("push_request_id") or params.get(
+            "remote_request_id"
+        )
         host = params.get("remote_host")
         port = params.get("remote_port")
         tp_size = params.get("tp_size")
