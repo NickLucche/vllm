@@ -482,6 +482,30 @@ def test_free_kv_cache_block_queue_get_all_free_blocks():
     assert queue.get_all_free_blocks() == blocks[1:2] + blocks[3:] + [block_to_remove]
 
 
+def test_free_kv_cache_block_queue_scramble(monkeypatch):
+    def block_ids(seed: str | None) -> list[int]:
+        if seed is None:
+            monkeypatch.delenv("VLLM_KV_SCRAMBLE_BLOCKS", raising=False)
+        else:
+            monkeypatch.setenv("VLLM_KV_SCRAMBLE_BLOCKS", seed)
+        blocks = [KVCacheBlock(block_id=i) for i in range(64)]
+        queue = FreeKVCacheBlockQueue(blocks)
+        return [b.block_id for b in queue.get_all_free_blocks()]
+
+    # Unset or 0: disabled, preserve the original block_id order.
+    assert block_ids(None) == list(range(64))
+    assert block_ids("0") == list(range(64))
+
+    # Enabled (nonzero seed): same set of blocks, but reordered.
+    scrambled = block_ids("1")
+    assert sorted(scrambled) == list(range(64))
+    assert scrambled != list(range(64))
+
+    # Reproducible: same seed -> same permutation; different seed -> different.
+    assert block_ids("1") == scrambled
+    assert block_ids("2") != scrambled
+
+
 def test_generate_block_hash_extra_keys():
     request = make_request(
         request_id="0",
