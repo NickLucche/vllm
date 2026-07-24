@@ -6,6 +6,7 @@ import copy
 import hashlib
 import math
 import os
+import random
 import weakref
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
@@ -283,6 +284,7 @@ class FreeKVCacheBlockQueue:
 
     def __init__(self, blocks: list[KVCacheBlock]) -> None:
         self.num_free_blocks = len(blocks)
+        _maybe_scramble_blocks(blocks)
 
         # Initialize doubly links of consecutive blocks
         for i in range(self.num_free_blocks):
@@ -520,6 +522,24 @@ class FreeKVCacheBlockQueue:
         while curr_block is not None and curr_block is not self.fake_free_list_tail:
             yield curr_block
             curr_block = curr_block.next_free_block
+
+
+def _maybe_scramble_blocks(blocks: list[KVCacheBlock]) -> None:
+    """DEV only: shuffle free blocks in place when VLLM_KV_SCRAMBLE_BLOCKS is set.
+
+    Gives requests physically non-contiguous blocks from the first allocation to
+    reproduce worst-case allocation scenario. See the env var docs in envs.py.
+    """
+    seed = envs.VLLM_KV_SCRAMBLE_BLOCKS
+    if not seed:
+        return
+    logger.warning(
+        "VLLM_KV_SCRAMBLE_BLOCKS is set (seed=%d); shuffling KV free-block "
+        "order. This is a DEV/benchmarking flag, do not use in production.",
+        seed,
+    )
+    # Local RNG so we don't perturb global random state.
+    random.Random(seed).shuffle(blocks)
 
 
 def _gen_mm_extra_hash_keys(
