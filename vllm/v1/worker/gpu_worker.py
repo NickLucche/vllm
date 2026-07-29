@@ -4,6 +4,7 @@
 
 import gc
 import os
+import sys
 import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -290,6 +291,16 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Init device")
     def init_device(self):
+        # Debug aid for silent worker hangs: periodically dump every thread's
+        # stack to stderr so it lands in the container log stream. Needed where
+        # py-spy cannot be attached (e.g. read-only pods).
+        if interval := int(os.getenv("VLLM_DEBUG_STACK_DUMP_INTERVAL", "0")):
+            import faulthandler
+
+            faulthandler.dump_traceback_later(
+                interval, repeat=True, exit=False, file=sys.stderr
+            )
+
         if self.device_config.device_type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)

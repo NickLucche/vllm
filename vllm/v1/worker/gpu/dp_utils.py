@@ -2,15 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.distributed as dist
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_dp_group
+from vllm.logger import init_logger
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
+
+logger = init_logger(__name__)
+
+# Logs one line per DP sync so a rank that stops participating can be spotted
+# by diffing the final sequence number across ranks.
+_DPSYNC_TRACE = bool(int(os.getenv("VLLM_DEBUG_DPSYNC_TRACE", "0")))
+_dpsync_seq = 0
 
 
 def sync_cudagraph_and_dp_padding(
@@ -34,6 +44,19 @@ def sync_cudagraph_and_dp_padding(
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
+    if _DPSYNC_TRACE:
+        global _dpsync_seq
+        _dpsync_seq += 1
+        logger.info(
+            "DPSYNC enter seq=%d rank=%d num_tokens=%d num_reqs=%d "
+            "cg_mode=%s uniform=%s",
+            _dpsync_seq,
+            dp_rank,
+            num_tokens,
+            num_reqs,
+            desired_batch_desc.cg_mode.name,
+            uniform_token_count,
+        )
     dist.all_reduce(tensor, group=group)
 
     num_tokens_across_dp = tensor[0]
