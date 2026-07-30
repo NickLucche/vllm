@@ -5,7 +5,6 @@
 import time
 from typing import TYPE_CHECKING
 
-from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -130,58 +129,55 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             self._handle_failed_transfer(req_id, None)
             return
 
+        plan = self.tp_mappings[engine_id]
         remote_pp_rank = self.transfer_topo.resolve_remote_pp_rank(
             engine_id, self.pp_rank
         )
         remote_info = self.transfer_topo.get_engine_info(engine_id, remote_pp_rank)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
-        remote_worker_keys = (
-            self.transfer_topo.get_target_remote_worker_keys_from_engine_id(
-                engine_id, remote_pp_rank
-            )
+
+        meta.remote.block_ids = self._logical_to_kernel_block_ids(
+            meta.remote.block_ids,
+            remote_info.remote_physical_blocks_per_logical,
         )
-        logical_local_block_ids = meta.local_block_ids
-        logical_remote_block_ids = meta.remote.block_ids
-
-        plan = self.tp_mappings[engine_id]
-        needs_split_local_handles = self._needs_split_local_xfer_handles(tp_ratio, plan)
-        launched_read = False
-        for remote_worker_key in remote_worker_keys:
-            remote_tp_rank = remote_worker_key[1]
-            remote_agent_key: RemoteAgentKey = (remote_pp_rank, *remote_worker_key)
-            local_block_ids: BlockIds
-            remote_block_ids: BlockIds
-            if len(logical_local_block_ids) == 0:
-                local_block_ids = []
-                remote_block_ids = []
-            else:
-                # Symmetric DCP: both sides own the same token slice, so the
-                # logical block lists line up by index. A local prefix-cache hit
-                # shortens the local list; _apply_prefix_caching end-trims remote
-                # to match, exactly as in the non-DCP path.
-                local_block_ids = self._logical_to_kernel_block_ids(
-                    logical_local_block_ids,
-                    self._physical_blocks_per_logical_kv_block,
-                )
-                remote_block_ids = self._logical_to_remote_kernel_block_ids(
-                    logical_remote_block_ids,
-                    remote_info.remote_physical_blocks_per_logical,
-                )
-
-            if any(len(group) > 0 for group in local_block_ids):
-                launched_read = True
-
-            spec = ReadSpec(
-                remote_rank=remote_tp_rank,
-                local_block_ids=local_block_ids,
-                remote_block_ids=remote_block_ids,
+        remote_block_ids = meta.remote.block_ids
+        local_block_ids = meta.local_physical_block_ids
+        num_groups = len(local_block_ids)
+        read_specs = [
+            ReadSpec(
+                remote_rank=rank,
+                local_block_ids=[
+                    list(local_block_ids[g])
+                    if rank in plan.source_ranks_per_group[g]
+                    else []
+                    for g in range(num_groups)
+                ],
+                remote_block_ids=[
+                    list(remote_block_ids[g])
+                    if rank in plan.source_ranks_per_group[g]
+                    else []
+                    for g in range(num_groups)
+                ],
             )
+            for rank in plan.all_source_ranks
+        ]
+
+        # D may have to perform multiple reads from different remote ranks.
+        # Pure MLA reads once because its cache is replicated. Hybrid
+        # MLA+SSM still needs one read per SSM source rank.
+        if self.use_mla and tp_ratio < 0 and not self._has_mamba:
+            assert len(read_specs) == 1
+
+        needs_split_local_handles = self._needs_split_local_xfer_handles(tp_ratio, plan)
+        for i, spec in enumerate(read_specs):
+            remote_tp_rank = spec.remote_rank
+            remote_agent_key: RemoteAgentKey = (remote_pp_rank, 0, remote_tp_rank)
             remote_block_size = remote_info.remote_block_size
             logger.debug(
                 "Remote agent %s available, calling _read_blocks"
-                " on remote worker %s with remote block size %s for req %s",
+                " on remote rank %s with remote block size %s for req %s",
                 meta.remote.engine_id,
-                remote_worker_key,
+                remote_tp_rank,
                 remote_block_size,
                 req_id,
             )
@@ -190,9 +186,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 # Remote tp_size > local tp_size: we must perform multiple
                 # reads. Get the memory chunk onto which we will write to.
                 split_key = (tp_ratio, remote_block_size)
-                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[split_key][
-                    remote_tp_rank - self.tp_rank * (-tp_ratio)
-                ]
+                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[split_key][i]
             else:
                 # Single read from remote, we write to the whole memory region.
                 # Also handle remote block size different from local block size.
@@ -206,7 +200,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             ]
             expected_consumers = self.transfer_topo.calculate_local_consumer_count(
                 engine_id,
-                remote_worker_key,
+                (0, remote_tp_rank),
                 remote_pp_rank,
             )
 
@@ -221,8 +215,15 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 expected_consumers=expected_consumers,
             )
 
-        if not launched_read:
-            self._done_recving_without_xfer.add(req_id)
+        if self.use_mla and tp_ratio < 0 and len(read_specs) == 1:
+            # ..but we still need to notify the other remote ranks that we
+            # have the blocks we need so they can update the request state.
+            notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
+            remote_agents = self._remote_agents[meta.remote.engine_id]
+            read_key = (remote_pp_rank, 0, read_specs[0].remote_rank)
+            for key_to_notify, agent in remote_agents.items():
+                if key_to_notify != read_key:
+                    self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
 
     def _read_blocks(
         self,

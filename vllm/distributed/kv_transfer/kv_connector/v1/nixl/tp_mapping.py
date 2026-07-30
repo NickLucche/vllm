@@ -62,6 +62,11 @@ class TPMapping:
 # ======================================================================
 
 
+def _to_remote_tp_rank(head_shard: int, dcp_size: int, dcp_rank: int) -> int:
+    """Project a remote head shard onto the remote TP rank covering our slice."""
+    return head_shard * dcp_size + dcp_rank
+
+
 def compute_tp_mapping(
     transfer_topology: TransferTopology,
     remote_tp_size: int,
@@ -71,9 +76,21 @@ def compute_tp_mapping(
 
     Computes source ranks, head slot assignments, and the rank offset
     factor in a single pass.
+
+    With DCP the TP index carries two coordinates,
+    ``tp_rank = head_shard * dcp_size + dcp_rank``: only ``head_shard``
+    participates in KV head sharding, while ``dcp_rank`` selects a token
+    slice. The mapping is therefore computed over head shards and projected
+    back onto remote TP ranks at the end. Symmetric DCP is enforced at
+    handshake (``TransferTopology.validate_symmetric_dcp``), so a local rank
+    keeps its own ``dcp_rank`` when projecting. With ``dcp_size == 1`` every
+    step below is an identity and the mapping is bit-for-bit unchanged.
     """
-    tp_rank = transfer_topology.tp_rank
-    tp_size = transfer_topology.tp_size
+    dcp_size = transfer_topology.dcp_size
+    dcp_rank = transfer_topology.dcp_rank
+    tp_rank = transfer_topology.tp_rank // dcp_size
+    tp_size = transfer_topology.tp_size // dcp_size
+    remote_tp_size = remote_tp_size // dcp_size
     total_num_kv_heads = transfer_topology.total_num_kv_heads
     # --- Attention source ranks ---
     if transfer_topology.is_mla or tp_size >= remote_tp_size:
@@ -107,20 +124,27 @@ def compute_tp_mapping(
 
     all_ranks = sorted(set(attn_ranks) | set(ssm_ranks))
 
+    # --- Attention head slots (still indexed by head shard) ---
+    head_to_slot: dict[int, int] = {}
+    for i, r in enumerate(attn_ranks):
+        head_to_slot[r * total_num_kv_heads // remote_tp_size] = i
+    rank_to_attention_slot = {
+        _to_remote_tp_rank(r, dcp_size, dcp_rank): head_to_slot.get(
+            r * total_num_kv_heads // remote_tp_size, 0
+        )
+        for r in all_ranks
+    }
+
+    # --- Project head shards back onto remote TP ranks ---
+    attn_ranks = [_to_remote_tp_rank(r, dcp_size, dcp_rank) for r in attn_ranks]
+    ssm_ranks = [_to_remote_tp_rank(r, dcp_size, dcp_rank) for r in ssm_ranks]
+    all_ranks = [_to_remote_tp_rank(r, dcp_size, dcp_rank) for r in all_ranks]
+
     # --- Per-group ordered source ranks ---
     source_ranks_per_group = tuple(
         tuple(ssm_ranks) if _is_ssm_spec(t) else tuple(attn_ranks)
         for t in group_spec_types
     )
-
-    # --- Attention head slots ---
-    head_to_slot: dict[int, int] = {}
-    for i, r in enumerate(attn_ranks):
-        head_to_slot[r * total_num_kv_heads // remote_tp_size] = i
-    rank_to_attention_slot = {
-        r: head_to_slot.get(r * total_num_kv_heads // remote_tp_size, 0)
-        for r in all_ranks
-    }
 
     # --- Rank offset factor ---
     if transfer_topology.is_mla or tp_size <= remote_tp_size:
