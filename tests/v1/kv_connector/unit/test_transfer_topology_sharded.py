@@ -317,7 +317,9 @@ def test_notif_only_pp_routing_can_fan_out_to_remote_stages() -> None:
 def test_symmetric_dcp_accepts_matching_sizes() -> None:
     topology = _make_topology(dcp_size=2, dcp_rank=1)
 
-    topology.assert_symmetric_dcp("remote-engine", remote_dcp_size=2, remote_pcp_size=1)
+    topology.validate_symmetric_dcp(
+        "remote-engine", remote_dcp_size=2, remote_pcp_size=1
+    )
 
 
 @pytest.mark.parametrize(
@@ -331,7 +333,7 @@ def test_heterogeneous_dcp_is_rejected_at_handshake(
     topology = _make_topology(dcp_size=local_dcp_size)
 
     with pytest.raises(RuntimeError, match="heterogeneous decode context"):
-        topology.assert_symmetric_dcp(
+        topology.validate_symmetric_dcp(
             "remote-engine",
             remote_dcp_size=remote_dcp_size,
             remote_pcp_size=1,
@@ -345,7 +347,7 @@ def test_prefill_context_parallel_is_rejected_at_handshake(
     topology = _make_topology(pcp_size=local_pcp_size, dcp_size=1)
 
     with pytest.raises(RuntimeError, match="prefill context parallelism"):
-        topology.assert_symmetric_dcp(
+        topology.validate_symmetric_dcp(
             "remote-engine",
             remote_dcp_size=1,
             remote_pcp_size=remote_pcp_size,

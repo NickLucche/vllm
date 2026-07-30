@@ -713,7 +713,7 @@ class TransferTopology:
         Both KV head coverage and DCP token-slice coverage must overlap.
         Only symmetric DCP is supported: ``remote_dcp_size`` must equal the
         local ``dcp_size``, which is enforced at handshake by
-        :meth:`assert_symmetric_dcp`.
+        :meth:`validate_symmetric_dcp`.
         """
         remote_dcp_rank = self.get_dcp_rank(
             remote_tp_rank,
@@ -742,7 +742,7 @@ class TransferTopology:
         remote_pcp_size: int,
     ) -> bool:
         assert remote_dcp_size == self.dcp_size, (
-            "Only symmetric DCP is supported; call assert_symmetric_dcp() at "
+            "Only symmetric DCP is supported; call validate_symmetric_dcp() at "
             "handshake time."
         )
         # Condition H: KV head overlap. For MLA, TP ranks are KV replicas.
@@ -846,7 +846,7 @@ class TransferTopology:
             )
         )
 
-    def assert_symmetric_dcp(
+    def validate_symmetric_dcp(
         self,
         remote_engine_id: EngineId,
         remote_dcp_size: int,

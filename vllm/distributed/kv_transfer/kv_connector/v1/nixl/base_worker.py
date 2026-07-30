@@ -1752,7 +1752,9 @@ class NixlBaseConnectorWorker:
         ### Register remote engine in TransferTopology (idempotent).
         assert self.transfer_topo is not None
         transfer_topo = self.transfer_topo
-        transfer_topo.assert_symmetric_dcp(engine_id, remote_dcp_size, remote_pcp_size)
+        transfer_topo.validate_symmetric_dcp(
+            engine_id, remote_dcp_size, remote_pcp_size
+        )
         physical_blocks_per_logical = (
             nixl_agent_meta.physical_blocks_per_logical_kv_block
         )
