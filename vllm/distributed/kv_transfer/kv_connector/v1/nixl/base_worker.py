@@ -537,6 +537,10 @@ class NixlBaseConnectorWorker:
         ] = {}
         # Protects _handshake_futures and _remote_agents.
         self._handshake_lock = threading.RLock()
+        # Remote PP stage this worker exchanges KV with, per engine. Fixed once
+        # the remote's stages are registered, so it is resolved at handshake
+        # rather than on every transfer.
+        self._remote_pp_rank: dict[EngineId, int] = {}
 
         # TTL-based eviction of stale remote engine state.
         self._engine_last_active: dict[EngineId, float] = {}
@@ -1768,6 +1772,11 @@ class NixlBaseConnectorWorker:
             remote_pp_size=remote_pp_size,
         )
         transfer_topo.register_remote_engine(engine_id, transfer_info)
+        # Recomputed per registered stage; the registered set only grows, so
+        # the value after the last handshake is the one used.
+        self._remote_pp_rank[engine_id] = transfer_topo.resolve_remote_pp_rank(
+            engine_id, self.pp_rank
+        )
         logger.info(
             "Transfer plan: %s", transfer_topo.describe(engine_id, remote_pp_rank)
         )
@@ -2798,6 +2807,7 @@ class NixlBaseConnectorWorker:
         self.kv_caches_base_addr.pop(engine_id, None)
         self.dst_num_blocks.pop(engine_id, None)
         self.tp_mappings.pop(engine_id, None)
+        self._remote_pp_rank.pop(engine_id, None)
         if self.transfer_topo is not None:
             self.transfer_topo.unregister_remote_engine(engine_id)
 

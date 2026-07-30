@@ -130,9 +130,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             return
 
         plan = self.tp_mappings[engine_id]
-        remote_pp_rank = self.transfer_topo.resolve_remote_pp_rank(
-            engine_id, self.pp_rank
-        )
+        remote_pp_rank = self._remote_pp_rank[engine_id]
         remote_info = self.transfer_topo.get_engine_info(engine_id, remote_pp_rank)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
