@@ -314,46 +314,6 @@ def test_notif_only_pp_routing_can_fan_out_to_remote_stages() -> None:
     ) == [0, 1]
 
 
-def test_symmetric_dcp_accepts_matching_sizes() -> None:
-    topology = _make_topology(dcp_size=2, dcp_rank=1)
-
-    topology.validate_symmetric_dcp(
-        "remote-engine", remote_dcp_size=2, remote_pcp_size=1
-    )
-
-
-@pytest.mark.parametrize(
-    "local_dcp_size,remote_dcp_size", [(1, 2), (2, 1), (2, 4), (4, 2)]
-)
-def test_heterogeneous_dcp_is_rejected_at_handshake(
-    local_dcp_size: int, remote_dcp_size: int
-) -> None:
-    """Mismatched DCP sizes partition the sequence differently, so block ids
-    no longer line up by index. Fail loudly instead of moving wrong slices."""
-    topology = _make_topology(dcp_size=local_dcp_size)
-
-    with pytest.raises(RuntimeError, match="heterogeneous decode context"):
-        topology.validate_symmetric_dcp(
-            "remote-engine",
-            remote_dcp_size=remote_dcp_size,
-            remote_pcp_size=1,
-        )
-
-
-@pytest.mark.parametrize("local_pcp_size,remote_pcp_size", [(1, 2), (2, 1)])
-def test_prefill_context_parallel_is_rejected_at_handshake(
-    local_pcp_size: int, remote_pcp_size: int
-) -> None:
-    topology = _make_topology(pcp_size=local_pcp_size, dcp_size=1)
-
-    with pytest.raises(RuntimeError, match="prefill context parallelism"):
-        topology.validate_symmetric_dcp(
-            "remote-engine",
-            remote_dcp_size=1,
-            remote_pcp_size=remote_pcp_size,
-        )
-
-
 def test_symmetric_dcp_pairs_ranks_by_token_slice() -> None:
     """P and D partition the sequence identically, so a decode worker only
     pairs with prefill workers covering the same slice (dcp ranks 1 and 3 are

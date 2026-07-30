@@ -35,17 +35,22 @@ def _compute_mapping(
     is_mla: bool = False,
     num_kv_heads: int = 8,
     group_spec_types: tuple[type, ...] = (FullAttentionSpec,),
+    dcp_size: int = 1,
+    remote_dcp_size: int = 1,
 ) -> TPMapping:
     transfer_topology = SimpleNamespace(
         tp_rank=tp_rank,
         tp_size=tp_size,
         is_mla=is_mla,
         total_num_kv_heads=num_kv_heads,
+        dcp_size=dcp_size,
+        dcp_rank=tp_rank % dcp_size,
     )
     return compute_tp_mapping(
         transfer_topology=transfer_topology,
         remote_tp_size=remote_tp_size,
         group_spec_types=group_spec_types,
+        remote_dcp_size=remote_dcp_size,
     )
 
 
@@ -215,3 +220,108 @@ class TestMambaPlanSplitHandles:
 
         with pytest.raises(AssertionError, match="Head-sharded"):
             list(worker._build_local_splits_from_plan(plan, src_blocks_data, 2, 2))
+
+
+# ======================================================================
+# Decode context parallelism
+# ======================================================================
+
+
+def _owned_positions(
+    dcp_size: int, dcp_rank: int, cached: int, count: int
+) -> list[int]:
+    """Global block positions a DCP rank owns, past its prefix-cache hit."""
+    return [(cached + i) * dcp_size + dcp_rank for i in range(count)]
+
+
+@pytest.mark.parametrize(
+    "local_dcp,remote_dcp", [(1, 1), (2, 2), (1, 4), (4, 1), (2, 4), (4, 2)]
+)
+@pytest.mark.parametrize("cached", [0, 3])
+def test_dcp_slices_deliver_each_block_exactly_once(local_dcp, remote_dcp, cached):
+    """Across all its source ranks, a decode rank must receive every block of
+    its own token slice exactly once -- no gaps, no duplicate transfers."""
+    tp_size = max(local_dcp, 1) * 2
+    remote_tp_size = max(remote_dcp, 1) * 2
+    n_blocks = 24
+
+    for tp_rank in range(tp_size):
+        dcp_rank = tp_rank % local_dcp
+        local_positions = _owned_positions(local_dcp, dcp_rank, cached, n_blocks)
+        m = _compute_mapping(
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+            remote_tp_size=remote_tp_size,
+            is_mla=True,
+            num_kv_heads=1,
+            dcp_size=local_dcp,
+            remote_dcp_size=remote_dcp,
+        )
+        received: dict[int, int] = {}
+        for rank in m.all_source_ranks:
+            block_slice = m.block_slices[rank]
+            start_local, start_remote = block_slice.starts(local_positions[0])
+            remote_positions = _owned_positions(
+                remote_dcp, rank % remote_dcp, 0, n_blocks
+            )
+            local_idx = range(start_local, n_blocks, block_slice.local_stride)
+            remote_idx = range(start_remote, n_blocks, block_slice.remote_stride)
+            for li, ri in zip(local_idx, remote_idx):
+                # The two sides must be pointing at the same place in the sequence.
+                assert local_positions[li] == remote_positions[ri]
+                received[local_positions[li]] = received.get(local_positions[li], 0) + 1
+
+        reachable = [p for p in local_positions if p < n_blocks * remote_dcp]
+        assert sorted(received) == reachable
+        assert set(received.values()) == {1}
+
+
+def test_dcp_slices_skip_locally_cached_blocks():
+    """A prefix-cache hit shifts where the local slice starts, so the transfer
+    must begin further into the remote's block list."""
+    m = _compute_mapping(
+        tp_size=1,
+        remote_tp_size=1,
+        is_mla=True,
+        num_kv_heads=1,
+        dcp_size=1,
+        remote_dcp_size=1,
+    )
+    block_slice = m.block_slices[0]
+
+    assert block_slice.starts(0) == (0, 0)
+    # 5 blocks already cached locally: read the remote list from index 5.
+    assert block_slice.starts(5) == (0, 5)
+
+
+@pytest.mark.parametrize(
+    "tp_size,remote_tp_size,local_dcp,remote_dcp",
+    [(4, 2, 4, 2), (4, 4, 4, 4), (4, 1, 4, 1), (4, 4, 2, 4), (2, 4, 2, 4)],
+)
+def test_consumer_count_matches_the_ranks_that_actually_read(
+    tp_size, remote_tp_size, local_dcp, remote_dcp
+):
+    """The producer frees blocks after this many notifications, so an
+    over-count strands them until the lease expires and an under-count frees
+    them while a reader is still pulling."""
+    mappings = [
+        _compute_mapping(
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+            remote_tp_size=remote_tp_size,
+            is_mla=True,
+            num_kv_heads=1,
+            dcp_size=local_dcp,
+            remote_dcp_size=remote_dcp,
+        )
+        for tp_rank in range(tp_size)
+    ]
+
+    for remote_rank in range(remote_tp_size):
+        readers = sum(remote_rank in m.all_source_ranks for m in mappings)
+        if readers == 0:
+            # Nobody reads this rank; it is notified directly instead.
+            continue
+        for m in mappings:
+            if remote_rank in m.all_source_ranks:
+                assert m.local_consumers == readers

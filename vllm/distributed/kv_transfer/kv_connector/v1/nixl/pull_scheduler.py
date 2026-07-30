@@ -158,11 +158,24 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     local_block_ids = self.get_sw_clipped_blocks(
                         unhashed_local_block_ids
                     )
+                    # Blocks already covered by the local prefix cache. Their
+                    # count fixes where this rank's DCP slice starts, which the
+                    # worker needs to line up with the remote's slice.
+                    num_cached_blocks = (
+                        sum(
+                            block.block_hash is not None and not block.is_null
+                            for block in blocks.blocks[0]
+                        )
+                        if blocks.blocks
+                        else 0
+                    )
+
                     # Get unhashed blocks to pull from remote. Mind that a full prefix
                     # cache hit is indicated with an empty list.
                     self._reqs_need_recv[request.request_id] = (
                         request,
                         local_block_ids,
+                        num_cached_blocks,
                     )
 
                 else:
@@ -215,7 +228,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # To avoid stranding the prefill blocks in the prefill instance,
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.
-            self._reqs_need_recv[request.request_id] = (request, [])
+            self._reqs_need_recv[request.request_id] = (request, [], 0)
             params["do_remote_prefill"] = False
             return False, None
 

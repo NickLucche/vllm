@@ -6,6 +6,7 @@ KV cache helper for store.
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from math import gcd
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
@@ -711,9 +712,8 @@ class TransferTopology:
         """Return whether local and remote workers share KV coverage.
 
         Both KV head coverage and DCP token-slice coverage must overlap.
-        Only symmetric DCP is supported: ``remote_dcp_size`` must equal the
-        local ``dcp_size``, which is enforced at handshake by
-        :meth:`validate_symmetric_dcp`.
+        Used to pick handshake partners; the read path narrows this further
+        via ``TPMapping``.
         """
         remote_dcp_rank = self.get_dcp_rank(
             remote_tp_rank,
@@ -741,10 +741,6 @@ class TransferTopology:
         remote_dcp_size: int,
         remote_pcp_size: int,
     ) -> bool:
-        assert remote_dcp_size == self.dcp_size, (
-            "Only symmetric DCP is supported; call validate_symmetric_dcp() at "
-            "handshake time."
-        )
         # Condition H: KV head overlap. For MLA, TP ranks are KV replicas.
         # When the remote layout has no DCP token split beyond PCP, choose the
         # TP-mapped replica as the representative to avoid duplicate reads.
@@ -777,9 +773,10 @@ class TransferTopology:
                 < (local_kv_group + 1) * remote_eff_tp
             )
 
-        # Condition T: token-slice overlap. Symmetric DCP means the two sides
-        # partition the sequence identically, so coverage is rank equality.
-        token_overlap = local_dcp_rank == remote_dcp_rank
+        # Condition T: token-slice overlap. Two ranks share positions iff their
+        # dcp ranks agree modulo gcd of the two DCP sizes.
+        common_dcp = gcd(self.dcp_size, remote_dcp_size)
+        token_overlap = local_dcp_rank % common_dcp == remote_dcp_rank % common_dcp
         return head_overlap and token_overlap
 
     def get_target_remote_worker_keys(
@@ -845,34 +842,6 @@ class TransferTopology:
                 self.tp_size, self.dcp_size, self.pcp_size
             )
         )
-
-    def validate_symmetric_dcp(
-        self,
-        remote_engine_id: EngineId,
-        remote_dcp_size: int,
-        remote_pcp_size: int,
-    ) -> None:
-        """Reject context-parallel layouts this connector cannot yet map.
-
-        Heterogeneous DCP needs per-rank global block positions to be
-        intersected, and PCP needs its own routing; both are follow-up work.
-        Failing here keeps a misconfigured deployment from silently
-        transferring the wrong token slices.
-        """
-        if remote_dcp_size != self.dcp_size:
-            raise RuntimeError(
-                "NIXL does not yet support heterogeneous decode context "
-                f"parallelism: local dcp_size={self.dcp_size}, remote "
-                f"dcp_size={remote_dcp_size} (engine {remote_engine_id}). "
-                "Configure both engines with the same "
-                "--decode-context-parallel-size."
-            )
-        if remote_pcp_size > 1 or self.pcp_size > 1:
-            raise RuntimeError(
-                "NIXL does not yet support prefill context parallelism: local "
-                f"pcp_size={self.pcp_size}, remote pcp_size={remote_pcp_size} "
-                f"(engine {remote_engine_id})."
-            )
 
     def describe(self, remote_engine_id: EngineId, remote_pp_rank: int = 0) -> str:
         """One-line summary of transfer config for logging."""

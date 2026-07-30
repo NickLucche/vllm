@@ -1755,9 +1755,6 @@ class NixlBaseConnectorWorker:
         ### Register remote engine in TransferTopology (idempotent).
         assert self.transfer_topo is not None
         transfer_topo = self.transfer_topo
-        transfer_topo.validate_symmetric_dcp(
-            engine_id, remote_dcp_size, remote_pcp_size
-        )
         physical_blocks_per_logical = (
             nixl_agent_meta.physical_blocks_per_logical_kv_block
         )
@@ -1785,6 +1782,7 @@ class NixlBaseConnectorWorker:
             transfer_topology=transfer_topo,
             remote_tp_size=remote_tp_size,
             group_spec_types=self._group_spec_types,
+            remote_dcp_size=remote_dcp_size,
         )
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
@@ -1916,6 +1914,16 @@ class NixlBaseConnectorWorker:
         remote_engine_id = nixl_agent_meta.engine_id
 
         assert self.transfer_topo is not None
+        # PCP adds a second derived coordinate to the worker key that the
+        # transfer paths do not route on yet. Differing DCP sizes are fine:
+        # TPMapping's block slices realign the two interleaves.
+        if remote_pcp_size > 1 or self.pcp_size > 1:
+            raise RuntimeError(
+                "NIXL does not yet support prefill context parallelism: local "
+                f"pcp_size={self.pcp_size}, remote pcp_size={remote_pcp_size} "
+                f"(engine {remote_engine_id})."
+            )
+
         remote_info = self.transfer_topo.get_engine_info(
             remote_engine_id, remote_pp_rank
         )

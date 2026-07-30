@@ -242,6 +242,9 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker._engine_last_active = {}
     worker._bidirectional_kv_xfer_enabled = False
     worker._remote_pp_rank = {"remote-engine": 0}
+    worker.dcp_size = 1
+    worker.dcp_rank = 0
+    worker._group_spec_types = resolved_types
     worker._has_mamba = any(t is MambaSpec for t in resolved_types)
 
     has_mamba = any(t is MambaSpec for t in resolved_types)
@@ -264,6 +267,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     mock_plan = MagicMock(spec=TPMapping)
     mock_plan.all_source_ranks = ()
     mock_plan.source_ranks_per_group = ()
+    mock_plan.block_slices = {}
     worker.tp_mappings = {remote_engine_id: mock_plan}
 
     metadata = NixlConnectorMetadata()

@@ -205,7 +205,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # ReqMeta without a KeyError — the actual remote block IDs are
         # learned by P over the NIXL handshake at WRITE time.
         params["remote_block_ids"] = ()
-        self._reqs_need_recv[request.request_id] = (request, local_block_ids)
+        self._reqs_need_recv[request.request_id] = (request, local_block_ids, 0)
 
         # Mark as processed so a re-entry (e.g. preemption + reschedule)
         # doesn't re-stage the registration.
@@ -246,7 +246,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             # stranding the prefill blocks, we still register an empty
             # recv so the worker emits a notif that lets P free them.
             params["remote_block_ids"] = ()
-            self._reqs_need_recv[request.request_id] = (request, [])
+            self._reqs_need_recv[request.request_id] = (request, [], 0)
             params["do_remote_prefill"] = False
             return False, None
 

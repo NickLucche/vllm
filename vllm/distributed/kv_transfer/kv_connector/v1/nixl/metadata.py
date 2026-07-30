@@ -186,6 +186,8 @@ class ReqMeta:
     tp_size: int
     dcp_size: int = 1
     pcp_size: int = 1
+    local_num_computed_blocks: int = 0
+    """Logical blocks this rank already holds, i.e. its prefix-cache hit."""
     remote: RemoteMeta | None = None
     # Remote block size, discovered during NIXL handshake (push mode).
     remote_block_size: int | None = None
@@ -213,6 +215,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self,
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
+        local_num_computed_blocks: int = 0,
     ) -> ReqMeta:
         return ReqMeta(
             local_block_ids=local_block_ids,
@@ -223,6 +226,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             dcp_size=kv_transfer_params.get("dcp_size", 1),
             pcp_size=kv_transfer_params.get("pcp_size", 1),
             pp_size=kv_transfer_params.get("pp_size", 1),
+            local_num_computed_blocks=local_num_computed_blocks,
         )
 
     def add_new_req_to_save(
@@ -240,8 +244,11 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         request_id: ReqId,
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
+        local_num_computed_blocks: int = 0,
     ):
-        req = self._add_new_req(local_block_ids, kv_transfer_params)
+        req = self._add_new_req(
+            local_block_ids, kv_transfer_params, local_num_computed_blocks
+        )
         req.remote = RemoteMeta(
             block_ids=kv_transfer_params["remote_block_ids"],
             engine_id=kv_transfer_params["remote_engine_id"],
