@@ -537,7 +537,6 @@ class NixlBaseConnectorWorker:
         ] = {}
         # Protects _handshake_futures and _remote_agents.
         self._handshake_lock = threading.RLock()
-        self._done_recving_without_xfer: set[ReqId] = set()
 
         # TTL-based eviction of stale remote engine state.
         self._engine_last_active: dict[EngineId, float] = {}
@@ -2262,8 +2261,6 @@ class NixlBaseConnectorWorker:
         assert self.transfer_topo is not None
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
-        done_recving.update(self._done_recving_without_xfer)
-        self._done_recving_without_xfer.clear()
 
         # Drain queue of requests where handshake or transfer setup failed.
         failed_recv_reqs = set[ReqId]()

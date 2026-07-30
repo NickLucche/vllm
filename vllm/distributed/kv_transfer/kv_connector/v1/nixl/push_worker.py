@@ -55,7 +55,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
-    _is_attention_spec,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import get_base_request_id
 from vllm.logger import init_logger
@@ -506,62 +505,40 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_info = self.transfer_topo.get_engine_info(engine_id, remote_pp_rank)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
-        # Expand D's logical IDs using the ratio learned during the
-        # NIXL handshake. ``meta`` is freshly built by
-        # ``_do_start_push_kv`` so mutating it here is safe.
-        meta.remote.block_ids = self._logical_to_kernel_block_ids(
-            meta.remote.block_ids,
-            remote_info.remote_physical_blocks_per_logical,
-        )
-        remote_block_ids = meta.remote.block_ids
-        local_block_ids = meta.local_physical_block_ids
-        num_groups = len(local_block_ids)
-
-        # MLA latent is replicated across D's TP ranks: the tp-mapping
-        # collapses it to one rank (fine for reads), but push must WRITE every
-        # D rank or the rest decode stale KV. For hybrid MLA+SSM the sharded
-        # SSM state already targets every covered D rank, so only the
-        # attention groups need widening; pure MLA writes to all handshaked
-        # ranks (only the dst differs per rank).
-        replicate_attn = self.use_mla and tp_ratio < 0
-        if replicate_attn and not self._has_mamba:
-            assert len(plan.all_source_ranks) == 1
-            write_ranks = [
-                key[2]
-                for key in sorted(self.dst_xfer_side_handles[engine_id])
-                if key[0] == remote_pp_rank
-            ]
-        else:
-            write_ranks = list(plan.all_source_ranks)
-
-        def group_ids(block_ids: BlockIds, rank: int) -> BlockIds:
-            return [
-                list(block_ids[g])
-                if (replicate_attn and _is_attention_spec(self._group_spec_types[g]))
-                or rank in plan.source_ranks_per_group[g]
-                else []
-                for g in range(num_groups)
-            ]
-
-        write_specs = [
-            ReadSpec(
-                remote_rank=rank,
-                local_block_ids=group_ids(local_block_ids, rank),
-                remote_block_ids=group_ids(remote_block_ids, rank),
+        remote_worker_keys = (
+            self.transfer_topo.get_target_remote_worker_keys_from_engine_id(
+                engine_id,
+                remote_pp_rank,
             )
-            for rank in write_ranks
-        ]
+        )
+        logical_local_block_ids = meta.local_block_ids
+        logical_remote_block_ids = meta.remote.block_ids
         needs_split_local_handles = self._needs_split_local_xfer_handles(tp_ratio, plan)
 
         handles: list[int] = []
-        for i, spec in enumerate(write_specs):
-            remote_tp_rank = spec.remote_rank
+        for remote_worker_key in remote_worker_keys:
+            remote_tp_rank = remote_worker_key[1]
+            # Symmetric DCP: both sides own the same token slice, so the logical
+            # block lists line up by index.
+            local_block_ids = self._logical_to_kernel_block_ids(
+                logical_local_block_ids,
+                self._physical_blocks_per_logical_kv_block,
+            )
+            remote_block_ids = self._logical_to_remote_kernel_block_ids(
+                logical_remote_block_ids,
+                remote_info.remote_physical_blocks_per_logical,
+            )
+            spec = ReadSpec(
+                remote_rank=remote_tp_rank,
+                local_block_ids=local_block_ids,
+                remote_block_ids=remote_block_ids,
+            )
             remote_block_size = remote_info.remote_block_size
             logger.debug(
                 "Remote agent %s available, calling _xfer_blocks"
-                " on remote rank %s with remote block size %s for req %s",
+                " on remote worker %s with remote block size %s for req %s",
                 meta.remote.engine_id,
-                remote_tp_rank,
+                remote_worker_key,
                 remote_block_size,
                 req_id,
             )
@@ -570,19 +547,21 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 # Hybrid MLA+SSM also lands here: its split handles replicate
                 # the attention descriptors and chunk only the SSM state.
                 split_key = (tp_ratio, remote_block_size)
-                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[split_key][i]
+                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[split_key][
+                    remote_tp_rank - self.tp_rank * (-tp_ratio)
+                ]
             else:
                 local_xfer_side_handle = self.src_xfer_handles_by_block_size[
                     remote_block_size
                 ]
 
-            remote_agent_key: RemoteAgentKey = (remote_pp_rank, 0, remote_tp_rank)
+            remote_agent_key: RemoteAgentKey = (remote_pp_rank, *remote_worker_key)
             remote_xfer_side_handle = self.dst_xfer_side_handles[engine_id][
                 remote_agent_key
             ]
             expected_producers = self.transfer_topo.calculate_local_consumer_count(
                 engine_id,
-                (0, remote_tp_rank),
+                remote_worker_key,
                 remote_pp_rank,
             ) * self.transfer_topo.get_local_pp_producer_count(
                 self.pp_size, remote_info.remote_pp_size

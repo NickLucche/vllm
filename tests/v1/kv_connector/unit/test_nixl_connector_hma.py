@@ -1559,15 +1559,10 @@ def test_push_write_hybrid_mla_replicates_attention():
 
     worker = object.__new__(NixlPushConnectorWorker)
     worker.shutdown = lambda: None  # skeleton worker: silence __del__
-    worker.pp_rank = 0
-    worker.pp_size = 1
     worker.use_mla = True
     worker._has_mamba = True
     worker._group_spec_types = (MLAAttentionSpec, MambaSpec)
     worker.transfer_topo = MagicMock()
-    worker.transfer_topo.resolve_remote_pp_rank.return_value = 0
-    worker.transfer_topo.get_local_pp_producer_count.return_value = 1
-    worker.transfer_topo.calculate_local_consumer_count.return_value = 1
     worker.transfer_topo.tp_ratio.return_value = -2
     remote_info = MagicMock()
     remote_info.remote_physical_blocks_per_logical = 1
@@ -1585,8 +1580,7 @@ def test_push_write_hybrid_mla_replicates_attention():
             rank_offset_factor=0,
         )
     }
-    # Handles are keyed by the physical agent key (pp_rank, pcp_rank, tp_rank).
-    worker.dst_xfer_side_handles = {engine_id: {(0, 0, 0): 100, (0, 0, 1): 101}}
+    worker.dst_xfer_side_handles = {engine_id: {0: 100, 1: 101}}
     worker.src_xfer_handles_by_tp_ratio = {(-2, 4): [200, 201]}
     worker.src_xfer_handles_by_block_size = {4: 300}
     worker._sending_transfers = defaultdict(list)
