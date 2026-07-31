@@ -41,15 +41,36 @@ def _dcp_read_slice(
 ) -> tuple[list[int], list[int]]:
     """Slice a source rank's share of a DCP-sharded sequence.
 
-    Scoped to MLA PD with ``dcp_size in (1, tp_size)`` per side and DCP
-    sizes that divide one another (see ``pd_dcp_notes.md``): a side is
+    Scoped to MLA PD with ``dcp_size in (1, tp_size)``: a side is
     either fully replicated (holds the whole sequence) or fully sharded
     (holds exactly one out of every ``dcp_size`` blocks), and the ratio
-    between the two sizes is always a whole number. ``local_ids``/
-    ``remote_ids`` are each already only the blocks *not yet cached
-    locally*; ``local_num_computed_blocks`` is how many blocks precede
-    them, which is what lets the two sides realign after a prefix-cache
-    hit shifts where the new blocks start.
+    between the two sizes is always a whole number.
+
+    A post-hoc length comparison (what `_apply_prefix_caching` does for the
+    non-DCP case) can't recover this phase -- it only sees counts, not
+    positions:
+
+        local_dcp_size=4, local_dcp_rank=1
+        owns:       [1, 5, 9, 13, ...]
+        cached:     [1, 5]
+        next fetch: [9, 13, ...]
+
+    A given ``remote_rank`` can also drop out entirely: when the computed
+    ``start_local`` lands past the end of ``local_ids``, the slice is empty --
+    that remote had nothing left uncached.
+    ``_read_blocks`` already treats an all-empty ``local_block_ids`` as "notify only",
+    so this is equivalent to a "full prefix-cache hit".
+
+        local_dcp_size=2, local_dcp_rank=0
+        owns:       [0, 2, 4, 6]
+        cached:     [0, 2, 4]
+        remaining:  [6]
+
+        P0 owns:    [0, 4]
+        P2 owns:    [2, 6]
+
+        vs P0: start_local = (0-3) % 2 = 1  ->  [6][1::2] = []   (skip)
+        vs P2: start_local = (1-3) % 2 = 0  ->  [6][0::2] = [6]  (read)
     """
     local_size, remote_size = local_dcp_size, remote_dcp_size
     if local_size == remote_size:
@@ -197,11 +218,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             if dcp_active:
                 # DCP interleaves at block granularity, so slicing happens
                 # here on logical blocks, before kernel-block expansion.
-                # Mamba state is whole-sequence, not per-position, so the
-                # DCP interleave does not apply to it.
                 for g in range(num_groups):
                     if not local_ids[g] or _is_ssm_spec(self._group_spec_types[g]):
                         continue
+                    # Prefix cache hit may lead to skip some of the remote reads
                     local_ids[g], remote_ids[g] = _dcp_read_slice(
                         local_ids[g],
                         remote_ids[g],
@@ -211,9 +231,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                         remote_dcp_size=remote_info.remote_dcp_size,
                         local_num_computed_blocks=meta.local_num_computed_blocks,
                     )
-                    shared = min(len(local_ids[g]), len(remote_ids[g]))
-                    del local_ids[g][shared:]
-                    del remote_ids[g][shared:]
             read_specs.append(
                 ReadSpec(
                     remote_rank=rank,
@@ -225,9 +242,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # D may have to perform multiple reads from different remote ranks.
         # Pure MLA reads once because its cache is replicated. Hybrid
         # MLA+SSM still needs one read per SSM source rank. With DCP, pure
-        # MLA may also read multiple ranks (disjoint token slices rather
-        # than disjoint kv heads), so this check only applies when DCP is
-        # off on both sides.
+        # MLA may also read from multiple ranks (disjoint token slices).
         if self.use_mla and tp_ratio < 0 and not self._has_mamba and not dcp_active:
             assert len(read_specs) == 1
 
@@ -272,10 +287,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         if self.use_mla and tp_ratio < 0 and len(read_specs) == 1:
             # ..but we still need to notify the other remote ranks that we
             # have the blocks we need so they can update the request state.
-            # Correct with DCP unmodified: a sharded side always has
-            # tp_size == dcp_size, so the raw tp_ratio already reflects
-            # whether any remote replica is left unchosen (see
-            # pd_dcp_notes.md).
+            # Same thing for DCP (tp_size == dcp_size), so the raw tp_ratio already
+            # reflects whether any remote replica is left unchosen.
             notif_id = f"{meta.remote.request_id}:{plan.local_consumers}".encode()
             remote_agents = self._remote_agents[meta.remote.engine_id]
             for rank_to_notify, agent in remote_agents.items():
@@ -437,9 +450,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     )
                     continue
 
-                # The reader tells us directly how many notifications (in
-                # aggregate, across all its source ranks) to expect, rather
-                # than us re-deriving it from tp_size at receive time.
                 consumers_per_producer = int(expected_consumers)
                 self.expected_consumer_notifications_by_req[req_id] = max(
                     consumers_per_producer,

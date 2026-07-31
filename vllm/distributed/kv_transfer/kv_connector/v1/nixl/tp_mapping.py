@@ -56,9 +56,8 @@ class TPMapping:
     # FA head offset factor for hetero-TP (D_TP > P_TP).
     rank_offset_factor: int
 
-    # Local ranks (in aggregate) that read from a given source rank. The
-    # producer frees a request's blocks only once that many notifications
-    # have come in.
+    # Local ranks (in aggregate) that read from a given source rank. The producer frees
+    # a request's blocks only once that many notifications have come in.
     local_consumers: int = 1
 
 
@@ -78,10 +77,8 @@ def compute_tp_mapping(
     Computes source ranks, head slot assignments, and the rank offset
     factor in a single pass.
 
-    DCP support is scoped to MLA only, with ``dcp_size in (1, tp_size)`` on
-    each side and DCP sizes that divide one another — a side is either fully replicated
-    or fully sharded. Under that scope, the DCP-aware branch below mirrors
-    ``TransferTopology.handshake_target_ranks`` exactly.
+    DCP support is scoped to MLA only, with a side is either fully replicated or fully
+    sharded. DCP-branch reuses the same rank set used at handshake selection.
     """
     tp_rank = transfer_topology.tp_rank
     tp_size = transfer_topology.tp_size
@@ -89,20 +86,9 @@ def compute_tp_mapping(
     # --- Attention source ranks ---
     if transfer_topology.is_mla or tp_size >= remote_tp_size:
         if transfer_topology.is_mla and remote_dcp_size > 1:
-            local_dcp_size = transfer_topology.dcp_size
-            if local_dcp_size == 1:
-                # Replicated locally, sharded remotely: every shard needed.
-                attn_ranks = list(range(remote_tp_size))
-            else:
-                local_dcp_rank = transfer_topology.dcp_rank
-                if local_dcp_size <= remote_dcp_size:
-                    attn_ranks = [
-                        r
-                        for r in range(remote_tp_size)
-                        if r % local_dcp_size == local_dcp_rank
-                    ]
-                else:
-                    attn_ranks = [local_dcp_rank % remote_dcp_size]
+            attn_ranks = transfer_topology.dcp_source_ranks(
+                remote_tp_size, remote_dcp_size
+            )
         else:
             # D (local TP) > P (remote TP): multiple local ranks read different chunks
             # from *one* remote rank, corresponding to different kv heads.

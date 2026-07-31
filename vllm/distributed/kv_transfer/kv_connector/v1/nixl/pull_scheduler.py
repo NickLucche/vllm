@@ -158,9 +158,9 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     local_block_ids = self.get_sw_clipped_blocks(
                         unhashed_local_block_ids
                     )
-                    # Blocks already covered by the local prefix cache. Their
-                    # count fixes where this rank's DCP slice starts, which the
-                    # worker needs to line up with the remote's slice.
+                    # Blocks already covered by the local prefix cache. Their count
+                    # fixes where this rank's DCP slice starts, which the worker needs
+                    # to line up with the remote's slice.
                     num_cached_blocks = (
                         sum(
                             block.block_hash is not None and not block.is_null

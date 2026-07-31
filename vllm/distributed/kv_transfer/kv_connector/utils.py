@@ -582,6 +582,30 @@ class TransferTopology:
         """Whether the local engine's KV cache is replicated."""
         return self.is_mla or self.tp_size > self.total_num_kv_heads
 
+    def dcp_source_ranks(self, remote_tp_size: int, remote_dcp_size: int) -> list[int]:
+        """Remote ranks whose DCP slice overlaps mine (MLA, ``remote_dcp_size > 1``).
+
+        Shared by ``handshake_target_ranks`` (who to query metadata from) and
+        ``compute_tp_mapping`` (who to actually read from) — for MLA the two
+        questions have the identical answer, since DCP sharding is the only
+        thing keeping a remote rank from being interchangeable with any other.
+        """
+        local_dcp_size = self.dcp_size
+        if local_dcp_size == 1:
+            # Replicated locally, sharded remotely: no single remote
+            # rank holds the whole sequence, so every shard is needed.
+            return list(range(remote_tp_size))
+        local_dcp_rank = self.dcp_rank
+        if local_dcp_size <= remote_dcp_size:
+            # Both sharded, remote finer-grained: keep every remote
+            # rank whose slice sits inside mine.
+            return [
+                r for r in range(remote_tp_size) if r % local_dcp_size == local_dcp_rank
+            ]
+        # Both sharded, local finer-grained: exactly one remote rank
+        # covers my whole slice (and we read a slice of it).
+        return [local_dcp_rank % remote_dcp_size]
+
     def handshake_target_ranks(
         self, remote_tp_size: int, remote_dcp_size: int = 1
     ) -> list[int]:
@@ -599,24 +623,7 @@ class TransferTopology:
         already has ``tp_size == dcp_size``.
         """
         if remote_dcp_size > 1:
-            # This is for MLA
-            local_dcp_size = self.dcp_size
-            if local_dcp_size == 1:
-                # Replicated locally, sharded remotely: no single remote
-                # rank holds the whole sequence, so every shard is needed.
-                return list(range(remote_tp_size))
-            local_dcp_rank = self.dcp_rank
-            if local_dcp_size <= remote_dcp_size:
-                # Both sharded, remote finer-grained: keep every remote
-                # rank whose slice sits inside mine.
-                return [
-                    r
-                    for r in range(remote_tp_size)
-                    if r % local_dcp_size == local_dcp_rank
-                ]
-            # Both sharded, local finer-grained: exactly one remote rank
-            # covers my whole slice (and we read a slice).
-            return [local_dcp_rank % remote_dcp_size]
+            return self.dcp_source_ranks(remote_tp_size, remote_dcp_size)
 
         tp_ratio = self.tp_ratio(remote_tp_size)
         if tp_ratio > 0:
