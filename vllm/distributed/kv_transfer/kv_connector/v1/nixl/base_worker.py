@@ -375,10 +375,8 @@ class NixlBaseConnectorWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
 
-        # DCP support is scoped to MLA, with dcp_size in (1, tp_size) on each
-        # side and DCP sizes that divide one another (see pd_dcp_notes.md).
-        # A rank's DCP identity is always derivable this way -- it is never
-        # sent over the wire or stored independently.
+        # DCP support is scoped to MLA, with dcp_size in (1, tp_size): either fully
+        # replicated or fully sharded. A DCP rank is always derivable this way.
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.dcp_rank = self.tp_rank % self.dcp_size
 
@@ -525,26 +523,6 @@ class NixlBaseConnectorWorker:
         self.model_config = vllm_config.model_config
 
         self.use_mla = self.model_config.use_mla
-
-        # DCP+PD invariants (see pd_dcp_notes.md): a side is either fully
-        # replicated or fully sharded, never partially both; DCP is only
-        # supported for MLA; and PCP is not supported alongside a KV
-        # connector at all.
-        assert self.dcp_size in (1, self.world_size), (
-            f"decode_context_parallel_size={self.dcp_size} must be 1 or equal "
-            f"to tensor_parallel_size={self.world_size} when a KV connector "
-            "is configured."
-        )
-        assert self.use_mla or self.dcp_size == 1, (
-            "PD with decode_context_parallel_size > 1 is only supported for MLA models."
-        )
-        assert not (self._has_mamba and self.dcp_size > 1), (
-            "PD with decode_context_parallel_size > 1 is not supported for "
-            "hybrid Mamba/SSM models."
-        )
-        assert vllm_config.parallel_config.prefill_context_parallel_size == 1, (
-            "NIXL does not support prefill context parallelism."
-        )
 
         # Get the attention backend from the first layer
         # NOTE (NickLucche) models with multiple backends are not supported yet

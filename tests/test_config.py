@@ -55,8 +55,11 @@ def test_pd_dcp_interleave_size_is_adjusted_to_block_size(caplog):
         ),
     )
 
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
+    )
     with caplog.at_level(logging.WARNING):
-        config.validate_block_size()
+        config.adjust_dcp_kv_cache_interleave_size(kv_cache_config)
 
     assert config.parallel_config.cp_kv_cache_interleave_size == 16
     assert "automatically adjusted from 3 to block_size 16" in caplog.text

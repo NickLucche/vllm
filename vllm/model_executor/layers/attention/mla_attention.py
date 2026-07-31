@@ -2634,10 +2634,20 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
         self.dcp_world_size: int = -1
+        self._cp_kv_cache_interleave_size: int | None = None
 
-        self.cp_kv_cache_interleave_size: int = (
-            get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
-        )
+    @property
+    def cp_kv_cache_interleave_size(self) -> int:
+        """With PD+DCP, the real value isn't known until block_size is finalized,
+        which happens after this layer is built. Safe to cache after the first access,
+        as long as the adjustment always runs before any forward pass
+        (it's set up in Worker.initialize_from_config, ahead of warmup/serving).
+        """
+        if self._cp_kv_cache_interleave_size is None:
+            self._cp_kv_cache_interleave_size = (
+                get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
+            )
+        return self._cp_kv_cache_interleave_size
 
     @abstractmethod
     def forward_mqa(
