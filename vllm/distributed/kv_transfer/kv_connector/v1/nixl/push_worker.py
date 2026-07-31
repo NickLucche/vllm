@@ -517,7 +517,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         handles: list[int] = []
         for remote_worker_key in remote_worker_keys:
-            remote_tp_rank = remote_worker_key[1]
+            remote_tp_rank = remote_worker_key[2]
             # Symmetric DCP: both sides own the same token slice, so the logical
             # block lists line up by index.
             local_block_ids = self._logical_to_kernel_block_ids(
@@ -555,7 +555,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     remote_block_size
                 ]
 
-            remote_agent_key: RemoteAgentKey = (remote_pp_rank, *remote_worker_key)
+            remote_agent_key: RemoteAgentKey = remote_worker_key
             remote_xfer_side_handle = self.dst_xfer_side_handles[engine_id][
                 remote_agent_key
             ]

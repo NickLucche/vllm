@@ -5,6 +5,7 @@
 import time
 from typing import TYPE_CHECKING
 
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -146,45 +147,50 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             meta.local_num_computed_blocks * self.dcp_size + self.dcp_rank
         )
 
-        def spec_for(rank: int) -> ReadSpec:
+        def group_ids(
+            block_ids: BlockIds, rank: int, start: int, stride: int
+        ) -> list[list[int]]:
+            # Mamba state is whole-sequence, not per token position, so the DCP
+            # interleave does not apply to it.
+            return [
+                []
+                if rank not in plan.source_ranks_per_group[g]
+                else list(block_ids[g])
+                if _is_ssm_spec(self._group_spec_types[g])
+                else list(block_ids[g])[start::stride]
+                for g in range(num_groups)
+            ]
+
+        read_specs = []
+        for rank in plan.all_source_ranks:
             block_slice = plan.block_slices[rank]
             start_local, start_remote = block_slice.starts(local_first_position)
-            local_groups: list[list[int]] = []
-            remote_groups: list[list[int]] = []
-            for g in range(num_groups):
-                if rank not in plan.source_ranks_per_group[g]:
-                    local_groups.append([])
-                    remote_groups.append([])
-                    continue
-                if _is_ssm_spec(self._group_spec_types[g]):
-                    # Mamba state is whole-sequence, not per token position, so
-                    # the DCP interleave does not apply to it.
-                    local_ids = list(logical_local[g])
-                    remote_ids = list(logical_remote[g])
-                else:
-                    local_ids = list(logical_local[g])[
-                        start_local :: block_slice.local_stride
-                    ]
-                    remote_ids = list(logical_remote[g])[
-                        start_remote :: block_slice.remote_stride
-                    ]
-                    # Both progressions start at the same global position and
-                    # advance in lockstep, so the shorter one bounds the overlap.
-                    shared = min(len(local_ids), len(remote_ids))
-                    local_ids, remote_ids = local_ids[:shared], remote_ids[:shared]
-                local_groups.append(local_ids)
-                remote_groups.append(remote_ids)
-            return ReadSpec(
-                remote_rank=rank,
-                local_block_ids=self._logical_to_kernel_block_ids(
-                    local_groups, self._physical_blocks_per_logical_kv_block
-                ),
-                remote_block_ids=self._logical_to_remote_kernel_block_ids(
-                    remote_groups, remote_info.remote_physical_blocks_per_logical
-                ),
+            local_ids = group_ids(
+                logical_local, rank, start_local, block_slice.local_stride
             )
-
-        read_specs = [spec_for(rank) for rank in plan.all_source_ranks]
+            remote_ids = group_ids(
+                logical_remote, rank, start_remote, block_slice.remote_stride
+            )
+            # Both sides step in lockstep from the same global position, so the
+            # shorter one bounds the overlap. Mamba groups keep their own
+            # trimming in _apply_prefix_caching.
+            for g in range(num_groups):
+                if _is_ssm_spec(self._group_spec_types[g]):
+                    continue
+                shared = min(len(local_ids[g]), len(remote_ids[g]))
+                del local_ids[g][shared:]
+                del remote_ids[g][shared:]
+            read_specs.append(
+                ReadSpec(
+                    remote_rank=rank,
+                    local_block_ids=self._logical_to_kernel_block_ids(
+                        local_ids, self._physical_blocks_per_logical_kv_block
+                    ),
+                    remote_block_ids=self._logical_to_remote_kernel_block_ids(
+                        remote_ids, remote_info.remote_physical_blocks_per_logical
+                    ),
+                )
+            )
 
         # D may have to perform multiple reads from different remote ranks.
         # Pure MLA reads once because its cache is replicated. Hybrid
@@ -195,7 +201,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         needs_split_local_handles = self._needs_split_local_xfer_handles(tp_ratio, plan)
         for i, spec in enumerate(read_specs):
             remote_tp_rank = spec.remote_rank
-            remote_agent_key: RemoteAgentKey = (remote_pp_rank, 0, remote_tp_rank)
+            remote_agent_key: RemoteAgentKey = plan.agent_key(remote_tp_rank)
             remote_block_size = remote_info.remote_block_size
             logger.debug(
                 "Remote agent %s available, calling _read_blocks"
@@ -240,7 +246,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # ..but we still need to notify the other remote ranks that we
             # have the blocks we need so they can update the request state.
             notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
-            read_key = (remote_pp_rank, 0, read_specs[0].remote_rank)
+            read_key = plan.agent_key(read_specs[0].remote_rank)
             remote_agents = self._remote_agents[meta.remote.engine_id]
             for key_to_notify, agent in remote_agents.items():
                 if key_to_notify != read_key:

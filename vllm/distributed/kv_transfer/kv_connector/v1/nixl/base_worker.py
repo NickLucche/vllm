@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Base worker-side logic for the NIXL connector."""
 
-import itertools
 import logging
 import os
 import queue
@@ -63,6 +62,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
 )
 from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
 from vllm.distributed.parallel_state import (
+    get_dcp_group,
     get_pcp_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -382,18 +382,9 @@ class NixlBaseConnectorWorker:
             self.pp_rank = 0
         self.tp_size = self.world_size
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
-        try:
-            self.pcp_size = get_pcp_group().world_size
-            self.pcp_rank = get_pcp_group().rank_in_group
-        except AssertionError:
-            self.pcp_size = 1
-            self.pcp_rank = 0
-        self.dcp_rank = TransferTopology.get_dcp_rank(
-            tp_rank=self.tp_rank,
-            pcp_rank=self.pcp_rank,
-            pcp_size=self.pcp_size,
-            dcp_size=self.dcp_size,
-        )
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = get_pcp_group().rank_in_group
+        self.dcp_rank = get_dcp_group().rank_in_group
         self.local_worker_key: RemoteAgentKey = (
             self.pp_rank,
             self.pcp_rank,
@@ -645,13 +636,18 @@ class NixlBaseConnectorWorker:
         if not self.use_host_buffer:
             current_platform.set_device(self.device_id)
 
-        # Handshake only with remote workers whose KV head coverage and DCP
-        # token slice overlap this local worker.
+        # When target instance TP > local TP, we need to perform multiple
+        # handshakes. Do it in a single background job for simplicity.
+        # Regardless, only handshake with the remote TP rank(s) that current
+        # local rank will read from. Note that With homogeneous TP,
+        # this happens to be the same single rank_i.
         assert self.transfer_topo is not None
-        remote_worker_keys = self.transfer_topo.get_target_remote_worker_keys(
+        remote_worker_keys = self.transfer_topo.handshake_target_keys(
             remote_tp_size,
             remote_dcp_size,
             remote_pcp_size,
+            remote_pp_size,
+            notif_only=notif_agents_only,
         )
         remote_worker_to_agent_name: dict[RemoteAgentKey, str] = {}
         path = make_zmq_path("tcp", host, port)
@@ -661,17 +657,9 @@ class NixlBaseConnectorWorker:
         best_rtt = float("inf")
         best_offset: float | None = None
 
-        remote_pp_ranks = self.transfer_topo.get_target_remote_pp_ranks(
-            self.pp_rank,
-            self.pp_size,
-            remote_pp_size,
-            notif_only=notif_agents_only,
-        )
         with zmq_ctx(zmq.REQ, path) as sock:
-            for remote_pp_rank, remote_worker_key in itertools.product(
-                remote_pp_ranks, remote_worker_keys
-            ):
-                remote_pcp_rank, remote_tp_rank = remote_worker_key
+            for remote_worker_key in remote_worker_keys:
+                remote_pp_rank, remote_pcp_rank, remote_tp_rank = remote_worker_key
                 remote_dcp_rank = self.transfer_topo.get_dcp_rank(
                     remote_tp_rank,
                     remote_pcp_rank,
@@ -766,35 +754,10 @@ class NixlBaseConnectorWorker:
                         f"Expected {expected_engine_id},"
                         f"received {metadata.engine_id}."
                     )
-                if (
-                    metadata.tp_rank != remote_tp_rank
-                    or metadata.pcp_rank != remote_pcp_rank
-                ):
-                    raise RuntimeError(
-                        "Remote handshake metadata rank mismatch. "
-                        f"Expected (pcp_rank, tp_rank)="
-                        f"({remote_pcp_rank}, {remote_tp_rank}), got "
-                        f"({metadata.pcp_rank}, {metadata.tp_rank})."
-                    )
-                inferred_dcp_rank = TransferTopology.get_dcp_rank(
-                    metadata.tp_rank,
-                    metadata.pcp_rank,
-                    metadata.pcp_size,
-                    metadata.dcp_size,
+
+                self.transfer_topo.set_remote_dcp_rank(
+                    expected_engine_id, remote_worker_key, metadata.dcp_rank
                 )
-                if (
-                    inferred_dcp_rank != remote_dcp_rank
-                    or metadata.dcp_rank != inferred_dcp_rank
-                ):
-                    raise RuntimeError(
-                        "Remote handshake metadata DCP rank mismatch. "
-                        f"Expected dcp_rank={remote_dcp_rank}, inferred "
-                        f"dcp_rank={inferred_dcp_rank}, metadata "
-                        f"dcp_rank={metadata.dcp_rank} from "
-                        f"(pcp_rank={metadata.pcp_rank}, "
-                        f"tp_rank={metadata.tp_rank}, "
-                        f"dcp_size={metadata.dcp_size})."
-                    )
                 if not self.transfer_topo.has_kv_cache_overlap(
                     metadata.pcp_rank,
                     metadata.tp_rank,
@@ -1117,6 +1080,8 @@ class NixlBaseConnectorWorker:
             dcp_rank=self.dcp_rank,
             dcp_size=self.dcp_size,
             pcp_size=self.pcp_size,
+            pp_rank=self.pp_rank,
+            pp_size=self.pp_size,
         )
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config,
@@ -1224,6 +1189,8 @@ class NixlBaseConnectorWorker:
             dcp_rank=self.dcp_rank,
             dcp_size=self.dcp_size,
             pcp_size=self.pcp_size,
+            pp_rank=self.pp_rank,
+            pp_size=self.pp_size,
         )
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config, self.backend_name, self.transfer_topo.cross_layers_blocks
@@ -1783,6 +1750,7 @@ class NixlBaseConnectorWorker:
             remote_tp_size=remote_tp_size,
             group_spec_types=self._group_spec_types,
             remote_dcp_size=remote_dcp_size,
+            remote_pp_rank=remote_pp_rank,
         )
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(

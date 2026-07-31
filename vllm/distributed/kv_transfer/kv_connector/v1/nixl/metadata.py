@@ -17,9 +17,6 @@ logger = init_logger(__name__)
 
 TransferHandle = int
 ReqId = str
-# Physical worker identity, matching the last two dimensions of handshake keys.
-# DCP rank is derived from this key and the remote parallel sizes.
-RemoteWorkerKey = tuple[int, int]
 # Full remote agent identity: (pp_rank, pcp_rank, tp_rank).
 RemoteAgentKey = tuple[int, int, int]
 

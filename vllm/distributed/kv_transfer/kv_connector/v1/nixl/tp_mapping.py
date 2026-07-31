@@ -64,6 +64,13 @@ class TPMapping:
     # request's blocks only once that many of us have notified it.
     local_consumers: int = 1
 
+    # Remote pipeline stage these source ranks live on.
+    remote_pp_rank: int = 0
+
+    def agent_key(self, remote_tp_rank: int) -> tuple[int, int, int]:
+        """Physical (pp_rank, pcp_rank, tp_rank) identity of a source rank."""
+        return (self.remote_pp_rank, 0, remote_tp_rank)
+
 
 @dataclass(frozen=True)
 class BlockSlice:
@@ -199,6 +206,7 @@ def compute_tp_mapping(
     remote_tp_size: int,
     group_spec_types: tuple[type[KVCacheSpec], ...],
     remote_dcp_size: int = 1,
+    remote_pp_rank: int = 0,
 ) -> TPMapping:
     """Build the complete local-to-remote TP mapping.
 
@@ -304,4 +312,5 @@ def compute_tp_mapping(
         rank_offset_factor=rank_offset_factor,
         block_slices=block_slices,
         local_consumers=local_consumers,
+        remote_pp_rank=remote_pp_rank,
     )
