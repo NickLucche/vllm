@@ -93,6 +93,49 @@ def test_needs_split_local_xfer_handles(use_mla, source_ranks, tp_ratio, expecte
 
 
 @pytest.mark.cpu_test
+def test_update_state_after_alloc_tracks_cached_blocks_per_group():
+    """Hybrid SWA+FA requests can have different prefix-cache-hit counts per
+    KV cache group. Each group's count must be tracked independently rather
+    than collapsed to a single scalar, or DCP read-phase alignment
+    (local_num_computed_blocks) would misalign one of the groups."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
+        NixlPullConnectorScheduler,
+    )
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_utils import KVCacheBlock
+
+    scheduler = object.__new__(NixlPullConnectorScheduler)
+    scheduler._reqs_in_batch = set()
+    scheduler._reqs_need_save = {}
+    scheduler._reqs_need_recv = {}
+    scheduler.use_host_buffer = False
+    scheduler.is_bidirectional_kv_xfer_enabled = False
+    scheduler._is_hma_required = False
+
+    def cached(block_id):
+        return KVCacheBlock(block_id=block_id, _block_hash=object())
+
+    def uncached(block_id):
+        return KVCacheBlock(block_id=block_id)
+
+    # Group 0 (full-attention): 2 of 3 blocks cached.
+    # Group 1 (sliding-window): 1 of 3 blocks cached.
+    blocks = KVCacheBlocks(
+        blocks=(
+            [cached(0), cached(1), uncached(2)],
+            [cached(10), uncached(11), uncached(12)],
+        )
+    )
+
+    request = create_request(do_remote_prefill=True)
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=2)
+
+    _, _, local_num_computed_blocks = scheduler._reqs_need_recv[request.request_id]
+    assert local_num_computed_blocks == (2, 1)
+
+
+@pytest.mark.cpu_test
 def test_logical_to_kernel_block_ids_with_hma():
     """Test _logical_to_kernel_block_ids expands blocks when HMA is enabled.
 
@@ -241,7 +284,6 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
     worker._engine_last_active = {}
     worker._bidirectional_kv_xfer_enabled = False
-    worker._remote_pp_rank = {"remote-engine": 0}
     worker.dcp_size = 1
     worker.dcp_rank = 0
     worker._group_spec_types = resolved_types
@@ -267,7 +309,6 @@ def test_read_blocks_for_req_expands_remote_ids(
     mock_plan = MagicMock(spec=TPMapping)
     mock_plan.all_source_ranks = ()
     mock_plan.source_ranks_per_group = ()
-    mock_plan.block_slices = {}
     worker.tp_mappings = {remote_engine_id: mock_plan}
 
     metadata = NixlConnectorMetadata()
