@@ -555,7 +555,6 @@ class NixlBaseConnectorWorker:
             get_representative_spec_type(g.kv_cache_spec)
             for g in self.kv_cache_config.kv_cache_groups
         )
-
         # Per-region MLA flag, 1:1 with block_len_per_layer. True -> REPLICATE
         # (MLA), False -> SPLIT (head-sharded full-attn). Mixed only for models
         # combining both (e.g. GQA main + MLA Eagle-3 draft).
@@ -1747,8 +1746,8 @@ class NixlBaseConnectorWorker:
         remote_info = self.transfer_topo.get_engine_info(remote_engine_id)
         assert remote_info.remote_tp_size == remote_tp_size
         assert remote_info.remote_dcp_size == remote_dcp_size
-        # DCP sizes must divide one another (see pd_dcp_notes.md); this is
-        # what keeps the read-slicing math in pull_worker a closed form.
+        # DCP sizes must divide one another; this is what keeps the
+        # read-slicing math in pull_worker a closed form.
         assert (
             self.dcp_size % remote_dcp_size == 0 or remote_dcp_size % self.dcp_size == 0
         ), (
@@ -2444,39 +2443,6 @@ class NixlBaseConnectorWorker:
                     ).tolist()
                 )
         return physical_block_ids
-
-    def _logical_to_remote_kernel_block_ids(
-        self, block_ids: BlockIds, remote_physical_per_logical: int
-    ) -> BlockIds:
-        """Map logical block IDs to physical kernel block IDs on the remote.
-
-        Args:
-            block_ids: per-group lists of logical block IDs.
-            remote_physical_per_logical: remote engine's physical blocks
-                per logical block.
-
-        Returns:
-            Same structure with FA groups expanded (each logical block L
-            becomes kernel blocks [L*remote_physical_per_logical, ..
-            L*remote_physical_per_logical +
-            remote_physical_per_logical - 1]).
-            Mamba groups are passed through unchanged.
-        """
-        if remote_physical_per_logical == 1:
-            return block_ids
-        remote_arange = np.arange(remote_physical_per_logical).reshape(1, -1)
-        group_specs = self.kv_cache_config.kv_cache_groups
-        result = [
-            BlockTable.map_to_kernel_blocks(
-                np.array(group),
-                remote_physical_per_logical,
-                remote_arange,
-            ).tolist()
-            if not isinstance(group_specs[i].kv_cache_spec, MambaSpec)
-            else group
-            for i, group in enumerate(block_ids)
-        ]
-        return result
 
     def _apply_prefix_caching(
         self,

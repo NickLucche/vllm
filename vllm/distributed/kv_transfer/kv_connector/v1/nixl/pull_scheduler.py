@@ -158,16 +158,15 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     local_block_ids = self.get_sw_clipped_blocks(
                         unhashed_local_block_ids
                     )
-                    # Blocks already covered by the local prefix cache. Their count
-                    # fixes where this rank's DCP slice starts, which the worker needs
-                    # to line up with the remote's slice.
-                    num_cached_blocks = (
+                    # Blocks covered by the local prefix cache, per KV cache group.
+                    # Each count fixes where that group's DCP slice starts, which the
+                    # worker needs to line up with the remote's slice.
+                    local_num_computed_blocks = tuple(
                         sum(
                             block.block_hash is not None and not block.is_null
-                            for block in blocks.blocks[0]
+                            for block in group
                         )
-                        if blocks.blocks
-                        else 0
+                        for group in blocks.blocks
                     )
 
                     # Get unhashed blocks to pull from remote. Mind that a full prefix
@@ -175,7 +174,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     self._reqs_need_recv[request.request_id] = (
                         request,
                         local_block_ids,
-                        num_cached_blocks,
+                        local_num_computed_blocks,
                     )
 
                 else:
@@ -228,7 +227,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # To avoid stranding the prefill blocks in the prefill instance,
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.
-            self._reqs_need_recv[request.request_id] = (request, [], 0)
+            self._reqs_need_recv[request.request_id] = (request, [], ())
             params["do_remote_prefill"] = False
             return False, None
 

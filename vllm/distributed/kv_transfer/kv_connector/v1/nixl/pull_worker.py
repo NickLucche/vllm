@@ -229,7 +229,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                         local_dcp_size=self.dcp_size,
                         local_dcp_rank=self.dcp_rank,
                         remote_dcp_size=remote_info.remote_dcp_size,
-                        local_num_computed_blocks=meta.local_num_computed_blocks,
+                        local_num_computed_blocks=meta.local_num_computed_blocks[g],
                     )
             read_specs.append(
                 ReadSpec(

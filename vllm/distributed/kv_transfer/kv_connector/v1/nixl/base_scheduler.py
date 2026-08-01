@@ -104,7 +104,9 @@ class NixlBaseConnectorScheduler:
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[ReqId, tuple[Request, BlockIds, int]] = {}
+        self._reqs_need_recv: dict[
+            ReqId, tuple[Request, BlockIds, tuple[int, ...]]
+        ] = {}
         self._reqs_need_save: dict[ReqId, Request] = {}
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
