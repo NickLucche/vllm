@@ -591,19 +591,15 @@ class TransferTopology:
         thing keeping a remote rank from being interchangeable with any other.
         """
         local_dcp_size = self.dcp_size
-        if local_dcp_size == 1:
-            # Replicated locally, sharded remotely: no single remote
-            # rank holds the whole sequence, so every shard is needed.
-            return list(range(remote_tp_size))
         local_dcp_rank = self.dcp_rank
         if local_dcp_size <= remote_dcp_size:
-            # Both sharded, remote finer-grained: keep every remote
-            # rank whose slice sits inside mine.
+            # Keep every remote rank whose slice sits inside mine. When
+            # local_dcp_size == 1 (replicated locally), local_dcp_rank == 0 reduces to
+            # every remote rank, since no single one holds the whole sequence.
             return [
                 r for r in range(remote_tp_size) if r % local_dcp_size == local_dcp_rank
             ]
-        # Both sharded, local finer-grained: exactly one remote rank
-        # covers my whole slice (and we read a slice of it).
+        # Local finer-grained: exactly one remote rank covers my whole slice
         return [local_dcp_rank % remote_dcp_size]
 
     def handshake_target_ranks(
@@ -646,8 +642,9 @@ class TransferTopology:
                 return self.tp_size
             # Both sharded, different degrees.
             return max(1, self.dcp_size // remote_dcp_size)
-        ratio = self.tp_ratio(remote_tp_size)
-        return max(1, -ratio) if ratio < 0 else 1
+        # Remote replicated: `tp_ratio` local ranks share each remote rank
+        # when local_tp >= remote_tp, else each remote rank has one reader.
+        return max(1, self.tp_ratio(remote_tp_size))
 
     def target_remote_ranks(
         self, remote_engine_id: EngineId, remote_pp_rank: int = 0

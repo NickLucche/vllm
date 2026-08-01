@@ -986,7 +986,7 @@ class VllmConfig:
         # DCP+PD invariants:a side is either fully replicated or fully sharded; MLA only
         if (
             self.kv_transfer_config is not None
-            and self.kv_transfer_config.kv_connector == "NixlConnector"
+            and self.kv_transfer_config.has_connector("NixlConnector")
         ):
             assert self.parallel_config.prefill_context_parallel_size == 1, (
                 "NIXL does not support prefill context parallelism."

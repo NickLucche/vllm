@@ -85,7 +85,7 @@ def ensure_kv_transfer_initialized(
         vllm_config.kv_transfer_config.is_kv_transfer_instance
         and _KV_CONNECTOR_AGENT is None
     ):
-        # PD can only support a interleave_size equal to block_size, update config here
+        # PD only supports an interleave_size equal to block_size.
         vllm_config.adjust_dcp_kv_cache_interleave_size(kv_cache_config)
         _sync_engine_id_across_tp(vllm_config)
 

@@ -450,10 +450,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     )
                     continue
 
-                consumers_per_producer = int(expected_consumers)
-                self.expected_consumer_notifications_by_req[req_id] = max(
-                    consumers_per_producer,
-                    self.expected_consumer_notifications_by_req.get(req_id, 0),
+                # Every reader of this req_id reports the same count (it's
+                # derived from aggregate topology, not the specific rank),
+                # so repeated notifications never disagree on it.
+                self.expected_consumer_notifications_by_req[req_id] = int(
+                    expected_consumers
                 )
 
                 self.consumer_notification_counts_by_req[req_id] += 1
