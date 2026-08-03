@@ -303,6 +303,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker.transfer_topo.tp_ratio.return_value = tp_ratio
     remote_info = MagicMock()
     remote_info.remote_physical_blocks_per_logical = remote_physical_per_logical
+    remote_info.remote_dcp_size = 1
     worker.transfer_topo.get_engine_info.return_value = remote_info
     worker.use_mla = False
 
@@ -331,6 +332,79 @@ def test_read_blocks_for_req_expands_remote_ids(
     assert meta.remote.block_ids == expected_remote_block_ids, (
         f"Expected {expected_remote_block_ids}, got {meta.remote.block_ids}"
     )
+
+
+@pytest.mark.cpu_test
+def test_read_blocks_for_req_matches_dcp_before_hma_expansion():
+    """DCP positions are logical-block coordinates, so HMA expansion must
+    happen only after local and remote logical IDs have been matched."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+        TPMapping,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._physical_blocks_per_logical_kv_block = 2
+    worker._engine_last_active = {}
+    worker._bidirectional_kv_xfer_enabled = False
+    worker.dcp_size = 1
+    worker.dcp_rank = 0
+    worker._group_spec_types = (FullAttentionSpec,)
+    worker._has_mamba = False
+    worker.use_mla = True
+    worker.kv_cache_config = make_kv_cache_config(block_size=16)
+
+    remote_engine_id = "remote-engine"
+    remote_info = MagicMock(
+        remote_physical_blocks_per_logical=2,
+        remote_dcp_size=2,
+        remote_tp_size=2,
+        remote_block_size=16,
+    )
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.get_engine_info.return_value = remote_info
+    worker.transfer_topo.tp_ratio.return_value = 1
+
+    plan = MagicMock(spec=TPMapping)
+    plan.all_source_ranks = (1,)
+    plan.source_ranks_per_group = ((1,),)
+    plan.local_consumers = 1
+    worker.tp_mappings = {remote_engine_id: plan}
+    worker.src_xfer_handles_by_block_size = {16: 10}
+    worker.dst_xfer_side_handles = {remote_engine_id: {1: 20}}
+    worker._read_blocks = MagicMock()
+
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="test-req",
+        local_block_ids=([10, 11],),
+        kv_transfer_params={
+            "remote_block_ids": ([20],),
+            "remote_engine_id": remote_engine_id,
+            "remote_request_id": "prefill-test-req",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "tp_size": 2,
+            "dcp_size": 2,
+        },
+        local_num_computed_blocks=(0,),
+    )
+    meta = metadata.reqs_to_recv["test-req"]
+    meta.local_physical_block_ids = ([20, 21, 22, 23],)
+
+    worker._read_blocks_for_req("test-req", meta)
+
+    read_spec = worker._read_blocks.call_args.kwargs["read_spec"]
+    assert read_spec.local_block_ids == [[22, 23]]
+    assert read_spec.remote_block_ids == [[40, 41]]
+    # Keep the complete physical list for receive post-processing.
+    assert meta.remote.block_ids == [[40, 41]]
 
 
 @pytest.mark.cpu_test

@@ -196,13 +196,13 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_info = self.transfer_topo.get_engine_info(engine_id)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
+        logical_remote_block_ids = meta.remote.block_ids
         meta.remote.block_ids = self._logical_to_kernel_block_ids(
-            meta.remote.block_ids,
+            logical_remote_block_ids,
             remote_info.remote_physical_blocks_per_logical,
         )
-        remote_block_ids = meta.remote.block_ids
-        local_block_ids = meta.local_physical_block_ids
-        num_groups = len(local_block_ids)
+        logical_local_block_ids = meta.local_block_ids
+        num_groups = len(logical_local_block_ids)
         dcp_active = self.dcp_size > 1 or remote_info.remote_dcp_size > 1
 
         def group_ids(block_ids: BlockIds, rank: int) -> list[list[int]]:
@@ -213,8 +213,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
 
         read_specs = []
         for rank in plan.all_source_ranks:
-            local_ids = group_ids(local_block_ids, rank)
-            remote_ids = group_ids(remote_block_ids, rank)
+            local_ids = group_ids(logical_local_block_ids, rank)
+            remote_ids = group_ids(logical_remote_block_ids, rank)
             if dcp_active:
                 # DCP interleaves at block granularity, so slicing happens
                 # here on logical blocks, before kernel-block expansion.
@@ -231,6 +231,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                         remote_dcp_size=remote_info.remote_dcp_size,
                         local_num_computed_blocks=meta.local_num_computed_blocks[g],
                     )
+            local_ids = self._logical_to_kernel_block_ids(
+                local_ids, self._physical_blocks_per_logical_kv_block
+            )
+            remote_ids = self._logical_to_kernel_block_ids(
+                remote_ids, remote_info.remote_physical_blocks_per_logical
+            )
             read_specs.append(
                 ReadSpec(
                     remote_rank=rank,
