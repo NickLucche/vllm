@@ -136,6 +136,91 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "local_ids,remote_ids,remote_rank,local_dcp_size,local_dcp_rank,"
+    "remote_dcp_size,cached,expected_local,expected_remote",
+    [
+        pytest.param(
+            [100, 101, 102],
+            [200, 201],
+            1,
+            1,
+            0,
+            2,
+            0,
+            [101],
+            [200],
+            id="remote_tail_padding",
+        ),
+        pytest.param(
+            [100],
+            [200],
+            0,
+            2,
+            1,
+            1,
+            0,
+            [],
+            [],
+            id="local_tail_padding",
+        ),
+        pytest.param(
+            [100],
+            [200, 201],
+            2,
+            2,
+            0,
+            4,
+            3,
+            [100],
+            [201],
+            id="prefix_phase",
+        ),
+        pytest.param(
+            [100, 101],
+            [200, 201, 202, 203],
+            1,
+            2,
+            1,
+            2,
+            2,
+            [100, 101],
+            [202, 203],
+            id="equal_dcp_with_prefix",
+        ),
+    ],
+)
+def test_dcp_read_slice_matches_global_logical_positions(
+    local_ids,
+    remote_ids,
+    remote_rank,
+    local_dcp_size,
+    local_dcp_rank,
+    remote_dcp_size,
+    cached,
+    expected_local,
+    expected_remote,
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
+        _dcp_read_slice,
+    )
+
+    actual_local, actual_remote = _dcp_read_slice(
+        local_ids,
+        remote_ids,
+        remote_rank=remote_rank,
+        local_dcp_size=local_dcp_size,
+        local_dcp_rank=local_dcp_rank,
+        remote_dcp_size=remote_dcp_size,
+        local_num_computed_blocks=cached,
+    )
+
+    assert actual_local == expected_local
+    assert actual_remote == expected_remote
+    assert len(actual_local) == len(actual_remote)
+
+
+@pytest.mark.cpu_test
 def test_logical_to_kernel_block_ids_with_hma():
     """Test _logical_to_kernel_block_ids expands blocks when HMA is enabled.
 

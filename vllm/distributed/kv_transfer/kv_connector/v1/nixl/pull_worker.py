@@ -46,50 +46,50 @@ def _dcp_read_slice(
     (holds exactly one out of every ``dcp_size`` blocks), and the ratio
     between the two sizes is always a whole number.
 
-    A post-hoc length comparison (what `_apply_prefix_caching` does for the
-    non-DCP case) can't recover this phase -- it only sees counts, not
-    positions:
+    The closed-form slices below align the phase of the local uncached suffix
+    with each remote rank.  They must operate on logical IDs, before HMA
+    expands either side into kernel physical IDs.  The final truncation removes
+    non-overlapping allocation padding from an incomplete last DCP stripe.
 
-        local_dcp_size=4, local_dcp_rank=1
-        owns:       [1, 5, 9, 13, ...]
-        cached:     [1, 5]
-        next fetch: [9, 13, ...]
+    For example, the numbers below are global logical-block positions, not
+    block IDs allocated by either engine::
 
-    A given ``remote_rank`` can also drop out entirely: when the computed
-    ``start_local`` lands past the end of ``local_ids``, the slice is empty --
-    that remote had nothing left uncached.
-    ``_read_blocks`` already treats an all-empty ``local_block_ids`` as "notify only",
-    so this is equivalent to a "full prefix-cache hit".
+        local_dcp_size=2, local_dcp_rank=0, remote_dcp_size=4
+        local positions:          [0, 2, 4, 6]
+        cached local positions:   [0, 2, 4]
+        local_ids:                [L6]       # position 6 remains
 
-        local_dcp_size=2, local_dcp_rank=0
-        owns:       [0, 2, 4, 6]
-        cached:     [0, 2, 4]
-        remaining:  [6]
+        remote_rank=0 positions: [0, 4], remote_ids=[R0, R4]
+        start_local=(0-3)%2=1, start_remote=(3+1-0)//2=2
+        matched slices: [], []
 
-        P0 owns:    [0, 4]
-        P2 owns:    [2, 6]
-
-        vs P0: start_local = (0-3) % 2 = 1  ->  [6][1::2] = []   (skip)
-        vs P2: start_local = (1-3) % 2 = 0  ->  [6][0::2] = [6]  (read)
+        remote_rank=2 positions: [2, 6], remote_ids=[R2, R6]
+        start_local=(1-3)%2=0, start_remote=(3+0-1)//2=1
+        matched slices: [L6], [R6]
     """
     local_size, remote_size = local_dcp_size, remote_dcp_size
     if local_size == remote_size:
-        # Same interleave on both sides: no realignment needed, even when
-        # both are sharded (1-to-1 correspondence, identical to pre-DCP).
-        return local_ids, remote_ids
-
-    if local_size < remote_size:
+        # Same interleave on both sides. The remote list still starts at the
+        # beginning, so skip the logical blocks already cached locally.
+        local_slice = local_ids
+        remote_slice = remote_ids[local_num_computed_blocks:]
+    elif local_size < remote_size:
         k = remote_size // local_size
         p = (remote_rank - local_dcp_rank) // local_size
         start_local = (p - local_num_computed_blocks) % k
         start_remote = (local_num_computed_blocks + start_local - p) // k
-        return local_ids[start_local::k], remote_ids[start_remote:]
+        local_slice = local_ids[start_local::k]
+        remote_slice = remote_ids[start_remote:]
+    else:
+        k = local_size // remote_size
+        remote_dcp_rank = remote_rank % remote_size
+        c = (local_dcp_rank - remote_dcp_rank) // remote_size
+        start_remote = c + local_num_computed_blocks * k
+        local_slice = local_ids
+        remote_slice = remote_ids[start_remote::k]
 
-    k = local_size // remote_size
-    remote_dcp_rank = remote_rank % remote_size
-    c = (local_dcp_rank - remote_dcp_rank) // remote_size
-    start_remote = c + local_num_computed_blocks * k
-    return local_ids, remote_ids[start_remote::k]
+    matched_blocks = min(len(local_slice), len(remote_slice))
+    return local_slice[:matched_blocks], remote_slice[:matched_blocks]
 
 
 class NixlPullConnectorWorker(NixlBaseConnectorWorker):
