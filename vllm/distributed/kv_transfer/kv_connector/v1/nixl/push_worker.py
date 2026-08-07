@@ -505,9 +505,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         plan = self.tp_mappings[engine_id]
         remote_info = self.transfer_topo.get_engine_info(engine_id)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
-        member_state = self._member_xfer_state.get(engine_id)
         member_groups = (
-            member_state.plan.group_ids if member_state is not None else None
+            self._member_group_ids if self._requires_member_identity() else None
         )
 
         # Expand D's logical IDs using the ratio learned during the
@@ -563,9 +562,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 remote_block_size,
                 req_id,
             )
-            if member_state is not None:
-                local_xfer_side_handle = member_state.handle
-            elif tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1):
+            if tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1):
                 # Multiple targets: write each rank its chunk of local memory.
                 # Hybrid MLA+SSM also lands here: its split handles replicate
                 # the attention descriptors and chunk only the SSM state.

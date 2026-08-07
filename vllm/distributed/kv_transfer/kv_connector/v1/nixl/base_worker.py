@@ -12,7 +12,6 @@ import uuid
 from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
 
@@ -33,11 +32,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import CopyBlocksOp
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.member_transfer import (
-    MemberTransferPlan,
-    plan_member_transfer,
-    validate_region_members,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
     NixlAgentMetadata,
@@ -91,14 +85,6 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class _MemberTransferState:
-    """Cached local source handle and the plan that defines its layout."""
-
-    handle: int
-    plan: MemberTransferPlan
 
 
 class NixlBaseConnectorWorker:
@@ -274,8 +260,24 @@ class NixlBaseConnectorWorker:
         return region_idx < len(self._region_is_mla) and self._region_is_mla[region_idx]
 
     def _set_region_members(self, region_members: list[list[str]]) -> None:
-        validate_region_members(region_members)
+        members = [member for region in region_members for member in region]
+        if len(members) != len(set(members)):
+            raise RuntimeError("A KV cache layer spans multiple NIXL regions")
         self.region_members: list[list[str]] = region_members
+        self._member_names = tuple(members)
+        self._member_local_regions = tuple(
+            region_idx
+            for region_idx, region in enumerate(region_members)
+            for _ in region
+        )
+        try:
+            self._member_group_ids = tuple(
+                self._layer_name_to_kv_group_index[member] for member in members
+            )
+        except KeyError as e:
+            raise RuntimeError(
+                f"KV cache layer {e.args[0]!r} is not in a local cache group"
+            ) from e
 
     def _requires_member_identity(self) -> bool:
         """Whether this worker's local layout must be routed by layer name.
@@ -292,18 +294,10 @@ class NixlBaseConnectorWorker:
             and not self._has_mamba
         )
 
-    def _use_member_identity(self, nixl_agent_meta: NixlAgentMetadata) -> bool:
-        """Whether to route this remote's regions by layer name.
-
-        Raises:
-            RuntimeError: if the local layout requires member routing but the
-                remote peer advertised no member metadata. The compatibility
-                hash normally rejects such a peer, but the e2e HMA config runs
-                with ``enforce_handshake_compat=false``; falling back to
-                region-index routing here would silently transfer stale KV.
-        """
-        if not self._requires_member_identity():
-            return False
+    def _align_remote_regions_by_member(
+        self, nixl_agent_meta: NixlAgentMetadata
+    ) -> None:
+        """Select remote regions for this PP stage in local member order."""
         if not nixl_agent_meta.region_members:
             raise RuntimeError(
                 "Local hybrid KV layout requires member-identity routing, but "
@@ -311,55 +305,45 @@ class NixlBaseConnectorWorker:
                 "is empty). The peer is likely running an incompatible connector "
                 "or configuration; refusing to fall back to region-index routing."
             )
-        return True
+        num_regions = len(nixl_agent_meta.region_members)
+        if (
+            len(nixl_agent_meta.kv_caches_base_addr) != num_regions
+            or len(nixl_agent_meta.block_lens) != num_regions
+        ):
+            raise RuntimeError("NIXL region metadata has inconsistent lengths")
 
-    def _expand_remote_members(
-        self, nixl_agent_meta: NixlAgentMetadata
-    ) -> tuple[NixlAgentMetadata, MemberTransferPlan]:
-        return plan_member_transfer(
-            nixl_agent_meta,
-            self.region_members,
-            self._layer_name_to_kv_group_index,
-        )
+        remote_region_by_member: dict[str, int] = {}
+        for region_idx, members in enumerate(nixl_agent_meta.region_members):
+            for member in members:
+                if member in remote_region_by_member:
+                    raise RuntimeError(
+                        f"Remote advertised KV cache layer {member!r} in "
+                        "multiple NIXL regions"
+                    )
+                remote_region_by_member[member] = region_idx
 
-    def _check_member_plan_consistency(
-        self, engine_id: EngineId, member_plan: MemberTransferPlan
-    ) -> None:
-        """Reject a later remote TP rank whose member layout diverges.
+        remote_regions: list[int] = []
+        for member in self._member_names:
+            remote_region = remote_region_by_member.get(member)
+            if remote_region is None:
+                raise RuntimeError(
+                    "Remote NIXL metadata is missing locally owned KV cache "
+                    f"layer {member!r}; the transfer would leave it stale"
+                )
+            remote_regions.append(remote_region)
 
-        Every remote TP rank of one engine shares the single cached local
-        source handle, so its plan must match or the cached local descriptor
-        order would be paired with a different remote order. Called before any
-        per-rank NIXL resources are created, so a divergent rank fails without
-        leaking state.
-        """
-        existing = self._member_xfer_state.get(engine_id)
-        if existing is not None and existing.plan != member_plan:
+        if not remote_regions:
             raise RuntimeError(
-                f"Remote TP ranks of engine {engine_id!r} advertised inconsistent "
-                "member layouts; refusing to reuse the cached local member-ordered "
-                "transfer handle."
+                "Remote NIXL metadata has no members owned by this worker"
             )
 
-    def _register_member_state(
-        self,
-        engine_id: EngineId,
-        member_plan: MemberTransferPlan,
-        remote_block_size: int,
-    ) -> None:
-        """Register the engine's member-ordered local source handle once.
-
-        Idempotent per engine: the first remote TP rank registers the handle;
-        later ranks reuse it (consistency already checked by
-        ``_check_member_plan_consistency``).
-        """
-        if engine_id in self._member_xfer_state:
-            return
-        handle = self.register_local_xfer_handler(remote_block_size, member_plan)[0]
-        self._member_xfer_state[engine_id] = _MemberTransferState(
-            handle=handle,
-            plan=member_plan,
-        )
+        nixl_agent_meta.kv_caches_base_addr = [
+            nixl_agent_meta.kv_caches_base_addr[i] for i in remote_regions
+        ]
+        nixl_agent_meta.block_lens = [
+            nixl_agent_meta.block_lens[i] for i in remote_regions
+        ]
+        nixl_agent_meta.region_members = [[member] for member in self._member_names]
 
     def __init__(
         self,
@@ -587,8 +571,6 @@ class NixlBaseConnectorWorker:
         self.src_xfer_handles_by_tp_ratio: dict[tuple[int, int], list[int]] = {}
         # Map of engine_id -> {tp_rank: nixl_prepped_dlist_handle (int)}.
         self.dst_xfer_side_handles = defaultdict[EngineId, dict[int, int]](dict)
-        # engine -> member-ordered source handle and its immutable layout plan
-        self._member_xfer_state: dict[EngineId, _MemberTransferState] = {}
 
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
@@ -679,6 +661,9 @@ class NixlBaseConnectorWorker:
 
         # Member metadata is populated for HMA layouts.
         self.region_members = []
+        self._member_names: tuple[str, ...] = ()
+        self._member_local_regions: tuple[int, ...] = ()
+        self._member_group_ids: tuple[int, ...] = ()
         self._layer_name_to_kv_group_index = {
             layer: group_idx
             for group_idx, group in enumerate(self.kv_cache_config.kv_cache_groups)
@@ -1535,21 +1520,20 @@ class NixlBaseConnectorWorker:
         self,
         base_addresses: list[int],
         block_size_ratio: int,
-        member_plan: MemberTransferPlan | None = None,
     ) -> np.ndarray:
-        """Build local FA descriptors as an Nx3 uint64 array, optionally in
-        member order."""
+        """Build local FA descriptors as an Nx3 uint64 array."""
         assert self.transfer_topo is not None
         assert base_addresses, "Local KV cache base addresses must not be empty."
         num_blocks = self.num_blocks * block_size_ratio
         device_id = self.device_id
         block_arange = np.arange(num_blocks, dtype=np.uint64)
-        if member_plan is None:
-            region_iter = list(enumerate(base_addresses))
-        else:
+        if self._requires_member_identity() and self._member_local_regions:
             region_iter = [
-                (region, base_addresses[region]) for region in member_plan.local_regions
+                (region, base_addresses[region])
+                for region in self._member_local_regions
             ]
+        else:
+            region_iter = list(enumerate(base_addresses))
         parts: list[np.ndarray] = []
         for i, base_addr in region_iter:
             # K/V are packed into the content dim, so the whole block transfers
@@ -1564,10 +1548,8 @@ class NixlBaseConnectorWorker:
         plan: TPMapping,
         nixl_agent_meta: NixlAgentMetadata,
         block_size_ratio: int,
-        member_plan: MemberTransferPlan | None = None,
     ) -> np.ndarray:
-        """Build remote FA descriptors as an Nx3 uint64 array, optionally in
-        member order."""
+        """Build remote FA descriptors as an Nx3 uint64 array."""
         assert self.transfer_topo is not None
         assert nixl_agent_meta.kv_caches_base_addr, (
             "Remote KV cache base addresses must not be empty."
@@ -1582,8 +1564,9 @@ class NixlBaseConnectorWorker:
         device_id = nixl_agent_meta.device_id
         block_arange = np.arange(num_blocks, dtype=np.uint64)
         parts: list[np.ndarray] = []
+        member_order = self._requires_member_identity()
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
-            local_region = member_plan.local_regions[i] if member_plan else i
+            local_region = self._member_local_regions[i] if member_order else i
             replicated = self._is_region_replicated(local_region)
             # Read our whole local region size from remote..
             local_block_len = self.block_len_per_layer[local_region]
@@ -1608,7 +1591,6 @@ class NixlBaseConnectorWorker:
     def register_local_xfer_handler(
         self,
         block_size: int,
-        member_plan: MemberTransferPlan | None = None,
     ) -> tuple[int, np.ndarray]:
         """
         Function used for register local xfer handler with local block_size or
@@ -1621,7 +1603,6 @@ class NixlBaseConnectorWorker:
         register another local_xfer_handler using remote block len to ensure
         data copy correctness.
 
-        ``member_plan`` registers one descriptor group per pooled member.
         """
         assert self.transfer_topo is not None
         block_size_ratio = self.block_size // block_size
@@ -1630,7 +1611,6 @@ class NixlBaseConnectorWorker:
         blocks_data = self._build_fa_local(
             local_base_addresses,
             block_size_ratio,
-            member_plan,
         )
         logger.debug(
             "Created %s blocks for src engine %s and rank %s on device id %s",
@@ -1715,9 +1695,9 @@ class NixlBaseConnectorWorker:
             )
             return self._remote_agents[engine_id][(0, remote_tp_rank)]
 
-        member_plan: MemberTransferPlan | None = None
-        if self._use_member_identity(nixl_agent_meta):
-            nixl_agent_meta, member_plan = self._expand_remote_members(nixl_agent_meta)
+        member_order = self._requires_member_identity()
+        if member_order:
+            self._align_remote_regions_by_member(nixl_agent_meta)
         else:
             # Number of physical regions registered locally (one per layer/tensor).
             num_local_regions = len(self.block_len_per_layer)
@@ -1735,11 +1715,6 @@ class NixlBaseConnectorWorker:
                     nixl_agent_meta.kv_caches_base_addr[start:end]
                 )
                 nixl_agent_meta.block_lens = nixl_agent_meta.block_lens[start:end]
-
-        # Reject a divergent later TP rank before creating any per-rank NIXL
-        # resources, so the failure can't leak an unpublished remote agent.
-        if member_plan is not None:
-            self._check_member_plan_consistency(engine_id, member_plan)
 
         ### Register remote engine in TransferTopology (idempotent).
         assert self.transfer_topo is not None
@@ -1782,9 +1757,7 @@ class NixlBaseConnectorWorker:
         self.kv_caches_base_addr[engine_id][remote_tp_rank] = (
             nixl_agent_meta.kv_caches_base_addr
         )
-        self._validate_remote_agent_handshake(
-            nixl_agent_meta, remote_tp_size, member_plan
-        )
+        self._validate_remote_agent_handshake(nixl_agent_meta, remote_tp_size)
 
         # This is 1 when P and D `--tensor-parallel-size` match. Otherwise,
         # this is the ratio between the two sizes.
@@ -1845,9 +1818,7 @@ class NixlBaseConnectorWorker:
         # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
 
         # Register all remote blocks, but only the corresponding kv heads.
-        blocks_data = self._build_fa_remote(
-            plan, nixl_agent_meta, block_size_ratio, member_plan
-        )
+        blocks_data = self._build_fa_remote(plan, nixl_agent_meta, block_size_ratio)
         logger.debug(
             "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
             len(blocks_data),
@@ -1870,18 +1841,12 @@ class NixlBaseConnectorWorker:
             self.nixl_wrapper.prep_xfer_dlist(remote_agent_name, descs)
         )
 
-        if member_plan is not None:
-            self._register_member_state(
-                engine_id, member_plan, nixl_agent_meta.block_size
-            )
-
         return remote_agent_name
 
     def _validate_remote_agent_handshake(
         self,
         nixl_agent_meta: NixlAgentMetadata,
         remote_tp_size: int,
-        member_plan: MemberTransferPlan | None = None,
     ):
         """Validate the remote agent handshake metadata."""
         remote_engine_id = nixl_agent_meta.engine_id
@@ -1894,7 +1859,8 @@ class NixlBaseConnectorWorker:
         block_size_ratio = self.transfer_topo.block_size_ratio(
             nixl_agent_meta.block_size
         )
-        if member_plan is not None and tp_ratio < 0 and not self.use_mla:
+        member_order = self._requires_member_identity()
+        if member_order and tp_ratio < 0 and not self.use_mla:
             raise NotImplementedError(
                 "Attention-HMA push does not support decode TP greater than "
                 "prefill TP yet"
@@ -2009,10 +1975,10 @@ class NixlBaseConnectorWorker:
                 f"remote={nixl_agent_meta.block_lens}."
             )
         elif not self._has_mamba:
-            if member_plan is not None:
+            if member_order:
                 local_lens = [
                     self.block_len_per_layer[region]
-                    for region in member_plan.local_regions
+                    for region in self._member_local_regions
                 ]
             else:
                 local_lens = self.block_len_per_layer
@@ -2026,7 +1992,7 @@ class NixlBaseConnectorWorker:
             local_heads = self.transfer_topo.local_physical_heads
             remote_heads = max(1, total_kv_heads // remote_tp_size)
             for i, local_len in enumerate(local_lens):
-                region_idx = member_plan.local_regions[i] if member_plan else i
+                region_idx = self._member_local_regions[i] if member_order else i
                 replicated = model_replicated or self._is_region_replicated(region_idx)
                 remote_len = nixl_agent_meta.block_lens[i]
                 if replicated:
@@ -2059,8 +2025,8 @@ class NixlBaseConnectorWorker:
         # TP workers that handhshake with same remote have same #blocks.
         assert self.dst_num_blocks[remote_engine_id] == nixl_agent_meta.num_blocks
         expected_regions = (
-            len(member_plan.local_regions)
-            if member_plan is not None
+            len(self._member_local_regions)
+            if member_order
             else len(self.block_len_per_layer)
         )
         assert len(nixl_agent_meta.kv_caches_base_addr) == expected_regions
@@ -2748,9 +2714,6 @@ class NixlBaseConnectorWorker:
         # Notif-only engines (push-mode D side) have no descriptor state.
         for handle in self.dst_xfer_side_handles.pop(engine_id, {}).values():
             self.nixl_wrapper.release_dlist_handle(handle)
-        member_state = self._member_xfer_state.pop(engine_id, None)
-        if member_state is not None:
-            self.nixl_wrapper.release_dlist_handle(member_state.handle)
         for agent_name in self._remote_agents.pop(engine_id).values():
             self.nixl_wrapper.remove_remote_agent(agent_name)
 
