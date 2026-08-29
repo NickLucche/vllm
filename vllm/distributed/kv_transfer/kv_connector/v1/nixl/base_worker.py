@@ -13,7 +13,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import msgspec
 import numpy as np
@@ -946,6 +946,7 @@ class NixlBaseConnectorWorker:
                             error=e,
                             remote_engine_id=eid,
                         )
+                        self.xfer_stats.record_failed_handshake()
 
             fut.add_done_callback(done_callback)
             return fut
@@ -978,7 +979,7 @@ class NixlBaseConnectorWorker:
                     error=e,
                     meta=meta,
                 )
-                self._handle_failed_transfer(req_id, None)
+                self._handle_failed_transfer(req_id, None, failure="handshake")
 
         fut.add_done_callback(request_ready)
 
@@ -2236,7 +2237,12 @@ class NixlBaseConnectorWorker:
                 transfers[req_id] = in_progress
         return done_req_ids
 
-    def _handle_failed_transfer(self, req_id: str, handle: int | None):
+    def _handle_failed_transfer(
+        self,
+        req_id: str,
+        handle: int | None,
+        failure: Literal["transfer", "handshake"] | None = "transfer",
+    ):
         """
         Handle a failed transfer by marking all (logical) blocks as invalid and
         recording the failure.
@@ -2244,6 +2250,10 @@ class NixlBaseConnectorWorker:
         Args:
             req_id: The request ID.
             handle: The transfer handle.
+            failure: The failure category to record, grouped with transfer
+                failures when the handshake failed, or ``None`` when the
+                caller already recorded a more specific metric (eg KV expiry,
+                which is reported separately from transport failures).
         """
         # Use .get() here as the metadata cleanup is handled by get_finished()
         # TODO (NickLucche) handle failed transfer for HMA.
@@ -2252,7 +2262,10 @@ class NixlBaseConnectorWorker:
         self._failed_recv_reqs.put(req_id)
         if handle is not None:
             self.nixl_wrapper.release_xfer_handle(handle)
-        self.xfer_stats.record_failed_transfer()
+        if failure == "transfer":
+            self.xfer_stats.record_failed_transfer()
+        elif failure == "handshake":
+            self.xfer_stats.record_failed_handshake()
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
         """
