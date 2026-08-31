@@ -3,6 +3,7 @@
 
 import contextlib
 from types import SimpleNamespace
+from unittest.mock import MagicMock, call
 
 import pytest
 import torch
@@ -18,6 +19,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
@@ -297,3 +299,18 @@ def test_capture_model_profile_only_skips_lock(monkeypatch):
     runner.capture_model(profile_only=True)
 
     assert lock_calls == []
+
+def test_kv_connector_builds_worker_metadata_after_polling_completions():
+    """Transfer completions must be included in the current worker metadata."""
+    connector = MagicMock()
+    connector.has_connector_metadata.return_value = True
+
+    active_connector = ActiveKVConnector.__new__(ActiveKVConnector)
+    active_connector._disabled = False
+    active_connector.kv_connector = connector
+
+    active_connector.post_forward(set())
+
+    assert connector.method_calls.index(call.get_transfer_results(set())) < (
+        connector.method_calls.index(call.build_connector_worker_meta())
+    )
