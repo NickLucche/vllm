@@ -193,7 +193,7 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
-        # TODO we should avoid this overhead with no KVconnector
+        # TODO we should avoid this overhead with no KVconnector and also when connector is ready
         self._allocated_block_ids: set[int] | None = None
 
     def enable_allocation_tracking(self) -> None:

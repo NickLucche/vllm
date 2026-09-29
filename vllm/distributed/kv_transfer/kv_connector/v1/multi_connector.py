@@ -233,9 +233,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def is_connector_ready(self) -> bool:
         return any(c.is_connector_ready() for c in self._connectors)
 
-    def has_pending_init(self) -> bool:
-        return any(c.has_pending_init() for c in self._connectors)
-
     @property
     def sub_connectors(self) -> list[KVConnectorBase_V1]:
         return list(self._connectors)

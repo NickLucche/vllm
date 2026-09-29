@@ -354,6 +354,8 @@ class KVConnectorBase_V1(ABC):
         Call on both roles. The engine must be able to serve requests without
         this connector. Worker readiness is monotonic, and activation waits
         for all workers. Runtime disable/reconfiguration is not supported.
+        Readiness and initialization errors are observed during ordinary engine
+        steps; initialization alone does not keep an idle engine stepping.
 
         Metadata reporting, output updates, stats, reset and shutdown hooks
         must remain safe during initialization. Initialization failures must
@@ -396,10 +398,6 @@ class KVConnectorBase_V1(ABC):
                 self.get_connector_init_state() == ConnectorInitState.READY
             )
         return self._connector_ready
-
-    def has_pending_init(self) -> bool:
-        """Whether empty engine steps are needed to poll initialization."""
-        return self._async_init_enabled and not self.is_connector_ready()
 
     @property
     def role(self) -> KVConnectorRole:

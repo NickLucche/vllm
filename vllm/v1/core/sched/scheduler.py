@@ -2784,13 +2784,8 @@ class Scheduler(SchedulerInterface):
             or self.has_finished_requests()
             or (
                 self.connector is not None
-                and (
-                    self.connector.has_pending_init()
-                    or (
-                        self.connector.is_connector_ready()
-                        and self.connector.has_pending_push_work()
-                    )
-                )
+                and self.connector.is_connector_ready()
+                and self.connector.has_pending_push_work()
             )
             or (
                 self.ec_connector is not None
