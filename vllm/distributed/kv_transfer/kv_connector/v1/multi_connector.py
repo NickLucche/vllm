@@ -342,9 +342,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             )
         return found[0][1] if found else None
 
-    # A child only holds metadata if its scheduler side was ready when the step
-    # was built, and the worker side goes ready first, so bound metadata already
-    # implies readiness here.
+    # Bound metadata means the scheduler activated this child for the step.
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         for c in self._connectors:
             if c.has_connector_metadata():
@@ -418,7 +416,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def get_block_ids_with_load_errors(self) -> set[int]:
         agg_block_ids: set[int] = set()
         for c in self._connectors:
-            if c.is_connector_ready():
+            if c.has_connector_metadata():
                 agg_block_ids |= c.get_block_ids_with_load_errors()
         return agg_block_ids
 

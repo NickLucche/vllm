@@ -166,17 +166,14 @@ class KVConnectorMetadata(ABC):  # noqa: B024
 
 
 class NoOpKVConnectorMetadata(KVConnectorMetadata):
-    """Placeholder emitted while a connector is not ready to accept work.
-
-    Callers must detect it by type: a real connector may legitimately produce
-    empty metadata for a step, and that still has to be bound.
-    """
-
-    pass
+    """Mark a step that must skip connector transfer hooks."""
 
 
 class KVConnectorRequestHandler:
-    """Guard scheduler-side request hooks and own lifetime exclusions."""
+    """Guard scheduler-side request hooks and own lifetime exclusions.
+
+    Requests admitted before readiness stay excluded through completion.
+    """
 
     def __init__(self, connector: "KVConnectorBase_V1") -> None:
         self._connector = connector
@@ -250,11 +247,7 @@ class KVConnectorRequestHandler:
 
 
 class ConnectorInitState(enum.Enum):
-    """Local state of a connector's asynchronous initialization.
-
-    There is no FAILED state: a worker that fails to initialize raises
-    instead, which brings down the whole engine rather than degrading.
-    """
+    """Worker initialization state."""
 
     INITIALIZING = enum.auto()
     READY = enum.auto()
@@ -349,17 +342,13 @@ class KVConnectorBase_V1(ABC):
         self.request_handler = KVConnectorRequestHandler(self)
 
     def enable_async_init(self) -> None:
-        """Opt into one-shot asynchronous initialization before serving.
+        """Opt into one-shot initialization in both role constructors.
 
-        Call on both roles. The engine must be able to serve requests without
-        this connector. Worker readiness is monotonic, and activation waits
-        for all workers. Runtime disable/reconfiguration is not supported.
-        Readiness and initialization errors are observed during ordinary engine
-        steps; initialization alone does not keep an idle engine stepping.
-
-        Metadata reporting, output updates, stats, reset and shutdown hooks
-        must remain safe during initialization. Initialization failures must
-        be raised by get_connector_init_state().
+        Serving must work without this connector. Readiness is monotonic and
+        activation waits for all workers' reports during ordinary engine steps.
+        Idle engines do not poll. Metadata reporting, output updates, stats,
+        reset and shutdown must remain safe while initializing. Raise failures
+        from get_connector_init_state().
         """
         if self._async_init_enabled:
             raise RuntimeError("Asynchronous connector initialization is one-shot")
@@ -381,16 +370,7 @@ class KVConnectorBase_V1(ABC):
         return None
 
     def is_connector_ready(self) -> bool:
-        """Whether this connector can accept new requests.
-
-        While this returns False the request handler skips `on_new_request`,
-        `get_num_new_matched_tokens`, `update_state_after_alloc` and
-        `request_finished` for newly admitted requests, and hands the worker a
-        `NoOpKVConnectorMetadata` instead of calling `build_connector_meta`.
-        Those requests stay connector-ineligible for their whole lifetime, so a
-        connector never sees a later chunk of a request whose earlier chunks it
-        missed.
-        """
+        """Whether this connector can accept new requests."""
         if not self._async_init_enabled:
             return True
         if self._role == KVConnectorRole.WORKER and not self._connector_ready:

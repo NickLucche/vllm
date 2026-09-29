@@ -24,9 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorMetadata,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -533,7 +531,11 @@ class Scheduler(SchedulerInterface):
         self, request: Request
     ) -> tuple[KVCacheBlocks, int, int, bool]:
         connector = self.connector
-        if connector is not None and connector.supports_divergent_local_hybrid_hits:
+        if (
+            connector is not None
+            and connector.supports_divergent_local_hybrid_hits
+            and connector.request_handler.is_eligible(request.request_id)
+        ):
             return self.kv_cache_manager.get_computed_blocks_for_connector(request)
 
         blocks, num_local, shared_prefix_boundary = (
@@ -932,27 +934,18 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     did_prefix_cache_lookup = True
-                    connector_eligible = (
-                        self.connector is not None
-                        and self.connector.request_handler.is_eligible(request_id)
-                    )
-                    if self.connector is not None and not connector_eligible:
-                        (
-                            new_computed_blocks,
-                            num_new_local_computed_tokens,
-                            request.shared_prefix_boundary,
-                        ) = self.kv_cache_manager.get_computed_blocks(request)
-                        hit_diverged = False
-                    else:
-                        (
-                            new_computed_blocks,
-                            num_new_local_computed_tokens,
-                            request.shared_prefix_boundary,
-                            hit_diverged,
-                        ) = self._get_local_prefix_cache_hit(request)
+                    (
+                        new_computed_blocks,
+                        num_new_local_computed_tokens,
+                        request.shared_prefix_boundary,
+                        hit_diverged,
+                    ) = self._get_local_prefix_cache_hit(request)
 
                     # Get externally-cached tokens if using a KVConnector.
-                    if self.connector is not None:
+                    if (
+                        self.connector is not None
+                        and self.connector.request_handler.is_eligible(request_id)
+                    ):
                         # Present a block-aligned local hit to the connector so
                         # a strictly longer remote hit can supersede a local
                         # sub-block tail without racing its copy-on-write.
@@ -1018,11 +1011,10 @@ class Scheduler(SchedulerInterface):
                                 request.shared_prefix_boundary,
                             ) = self.kv_cache_manager.get_computed_blocks(request)
 
-                        if connector_eligible:
-                            connector_prefix_cache_queries = (
-                                request.num_tokens - num_new_local_computed_tokens
-                            )
-                            connector_prefix_cache_hits = num_external_computed_tokens
+                        connector_prefix_cache_queries = (
+                            request.num_tokens - num_new_local_computed_tokens
+                        )
+                        connector_prefix_cache_hits = num_external_computed_tokens
 
                     # Total computed tokens (local + external).
                     num_computed_tokens = (
@@ -1431,6 +1423,7 @@ class Scheduler(SchedulerInterface):
         # they cannot be reconstructed from a connector's append-only block
         # table. Drained every step so stale offers cannot accumulate.
         boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
+
         kv_connector_block_state = None
         if self.connector is not None:
             # Any request scheduled this step can become a connector job now,
