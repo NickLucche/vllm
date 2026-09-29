@@ -155,7 +155,14 @@ class KVConnectorMetadata(ABC):  # noqa: B024
     Scheduler KVConnector -> Worker KVConnector.
     """
 
-    pass
+    # Framework-owned, per-step exclusions for worker completion notifications.
+    # Kept on the metadata so queued steps do not consult mutable request state.
+    _excluded_finished_req_ids: frozenset[str] = frozenset()
+
+    def filter_finished_requests(self, finished_req_ids: set[str]) -> set[str]:
+        if not self._excluded_finished_req_ids:
+            return finished_req_ids
+        return finished_req_ids - self._excluded_finished_req_ids
 
 
 class NoOpKVConnectorMetadata(KVConnectorMetadata):
@@ -166,6 +173,80 @@ class NoOpKVConnectorMetadata(KVConnectorMetadata):
     """
 
     pass
+
+
+class KVConnectorRequestHandler:
+    """Guard scheduler-side request hooks and own lifetime exclusions."""
+
+    def __init__(self, connector: "KVConnectorBase_V1") -> None:
+        self._connector = connector
+        self._excluded_request_ids: set[str] = set()
+
+    def is_eligible(self, request_id: str) -> bool:
+        return request_id not in self._excluded_request_ids
+
+    def on_new_request(self, request: "Request") -> None:
+        if self._connector.is_connector_ready():
+            self._connector.on_new_request(request)
+        else:
+            self._excluded_request_ids.add(request.request_id)
+
+    def get_num_new_matched_tokens(
+        self, request: "Request", num_computed_tokens: int
+    ) -> tuple[int | None, bool]:
+        if not self.is_eligible(request.request_id):
+            return 0, False
+        return self._connector.get_num_new_matched_tokens(request, num_computed_tokens)
+
+    def update_state_after_alloc(
+        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+    ) -> None:
+        if self.is_eligible(request.request_id):
+            self._connector.update_state_after_alloc(
+                request, blocks, num_external_tokens
+            )
+
+    def request_finished(
+        self, request: "Request", block_ids: list[int]
+    ) -> tuple[bool, dict[str, Any] | None]:
+        if not self.is_eligible(request.request_id):
+            return False, None
+        return self._connector.request_finished(request, block_ids)
+
+    def request_finished_all_groups(
+        self, request: "Request", block_ids: tuple[list[int], ...]
+    ) -> tuple[bool, dict[str, Any] | None]:
+        if not self.is_eligible(request.request_id):
+            return False, None
+        assert isinstance(self._connector, SupportsHMA)
+        return self._connector.request_finished_all_groups(request, block_ids)
+
+    def register_finished_partial_tail(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        if not self.is_eligible(request.request_id):
+            return False
+        return self._connector.register_finished_partial_tail(
+            request, block_ids, partial_tail_offloads
+        )
+
+    def build_connector_meta(
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
+        if self._connector.is_connector_ready():
+            metadata = self._connector.build_connector_meta(
+                scheduler_output.without_requests(self._excluded_request_ids)
+            )
+        else:
+            metadata = NoOpKVConnectorMetadata()
+        metadata._excluded_finished_req_ids = frozenset(
+            scheduler_output.finished_req_ids & self._excluded_request_ids
+        )
+        self._excluded_request_ids.difference_update(scheduler_output.finished_req_ids)
+        return metadata
 
 
 class ConnectorInitState(enum.Enum):
@@ -265,9 +346,31 @@ class KVConnectorBase_V1(ABC):
         self._connector_ready = True
         self._connector_init_report_acknowledged = False
         self._ready_connector_ranks: set[int] = set()
+        self.request_handler = KVConnectorRequestHandler(self)
 
     def enable_async_init(self) -> None:
-        """Enable the generic asynchronous-initialization readiness handshake."""
+        """Opt into one-shot asynchronous initialization before serving.
+
+        Call on both roles. The engine must be able to serve requests without
+        this connector. Worker readiness is monotonic, and activation waits
+        for all workers. Runtime disable/reconfiguration is not supported.
+
+        Metadata reporting, output updates, stats, reset and shutdown hooks
+        must remain safe during initialization. Initialization failures must
+        be raised by get_connector_init_state().
+        """
+        if self._async_init_enabled:
+            raise RuntimeError("Asynchronous connector initialization is one-shot")
+        parallel_config = self._vllm_config.parallel_config
+        backend = parallel_config.distributed_executor_backend
+        if (backend == "external_launcher" and parallel_config.world_size > 1) or (
+            backend == "ray" and parallel_config.pipeline_parallel_size > 1
+        ):
+            raise ValueError(
+                "Asynchronous connector initialization requires readiness reports "
+                "from every worker; external_launcher with multiple ranks and "
+                "Ray pipeline parallelism are not supported"
+            )
         self._async_init_enabled = True
         self._connector_ready = False
 
@@ -278,7 +381,7 @@ class KVConnectorBase_V1(ABC):
     def is_connector_ready(self) -> bool:
         """Whether this connector can accept new requests.
 
-        While this returns False the scheduler skips `on_new_request`,
+        While this returns False the request handler skips `on_new_request`,
         `get_num_new_matched_tokens`, `update_state_after_alloc` and
         `request_finished` for newly admitted requests, and hands the worker a
         `NoOpKVConnectorMetadata` instead of calling `build_connector_meta`.
@@ -288,9 +391,15 @@ class KVConnectorBase_V1(ABC):
         """
         if not self._async_init_enabled:
             return True
-        if self._role == KVConnectorRole.WORKER:
-            return self.get_connector_init_state() == ConnectorInitState.READY
+        if self._role == KVConnectorRole.WORKER and not self._connector_ready:
+            self._connector_ready = (
+                self.get_connector_init_state() == ConnectorInitState.READY
+            )
         return self._connector_ready
+
+    def has_pending_init(self) -> bool:
+        """Whether empty engine steps are needed to poll initialization."""
+        return self._async_init_enabled and not self.is_connector_ready()
 
     @property
     def role(self) -> KVConnectorRole:
@@ -547,12 +656,9 @@ class KVConnectorBase_V1(ABC):
             or self._role != KVConnectorRole.WORKER
         ):
             return None
-        state = self.get_connector_init_state()
-        if state is None:
-            return None
         rank = self._vllm_config.parallel_config.rank
         return KVConnectorRankInitStatus(
-            ready_ranks={rank} if state == ConnectorInitState.READY else set(),
+            ready_ranks={rank} if self.is_connector_ready() else set(),
         )
 
     def update_connector_init_status(

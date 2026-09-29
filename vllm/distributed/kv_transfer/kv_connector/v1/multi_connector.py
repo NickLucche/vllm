@@ -4,7 +4,7 @@ import copy
 from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -229,14 +229,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         # a single connector to load.
         # Propagated from scheduler to worker side via the connector metadata.
         self._extra_async_saves: dict[str, int] = {}
-        # A request can use only the child connectors that were ready when it
-        # arrived. Preserve that eligibility across all chunks of the request.
-        self._ineligible_request_ids_by_connector = [
-            set[str]() for _ in self._connectors
-        ]
 
     def is_connector_ready(self) -> bool:
         return any(c.is_connector_ready() for c in self._connectors)
+
+    def has_pending_init(self) -> bool:
+        return any(c.has_pending_init() for c in self._connectors)
 
     @property
     def sub_connectors(self) -> list[KVConnectorBase_V1]:
@@ -347,7 +345,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             )
         return found[0][1] if found else None
 
-
     # A child only holds metadata if its scheduler side was ready when the step
     # was built, and the worker side goes ready first, so bound metadata already
     # implies readiness here.
@@ -399,10 +396,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self, finished_req_ids: set[str]
     ) -> KVConnectorTransferResults:
         results = KVConnectorTransferResults()
-        for connector in self._connectors:
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, MultiKVConnectorMetadata)
+        for connector, child_metadata in zip(self._connectors, metadata.metadata):
             if not connector.has_connector_metadata():
                 continue
-            child_results = connector.get_transfer_results(finished_req_ids)
+            child_results = connector.get_transfer_results(
+                child_metadata.filter_finished_requests(finished_req_ids)
+            )
             results.finished_recving.update(child_results.finished_recving)
             results.failed_recving.update(child_results.failed_recving)
             for req_id in child_results.finished_sending:
@@ -484,9 +485,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> tuple[int | None, bool]:
         to_return = (0, False)
         for i, c in enumerate(self._connectors):
-            if request.request_id in self._ineligible_request_ids_by_connector[i]:
-                continue
-            toks, load_async = c.get_num_new_matched_tokens(
+            toks, load_async = c.request_handler.get_num_new_matched_tokens(
                 request, num_computed_tokens
             )
             # If there is a connector still looking up the matches,
@@ -505,37 +504,26 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     ):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
         for i, c in enumerate(self._connectors):
-            if request.request_id in self._ineligible_request_ids_by_connector[i]:
-                continue
             if i == chosen_connector:
                 # Forward call to the chosen connector (if any).
-                c.update_state_after_alloc(request, blocks, num_external_tokens)
+                c.request_handler.update_state_after_alloc(
+                    request, blocks, num_external_tokens
+                )
             else:
                 # Other connectors still receive the request's real blocks
-                c.update_state_after_alloc(request, blocks, 0)
+                c.request_handler.update_state_after_alloc(request, blocks, 0)
 
     def on_new_request(self, request: "Request") -> None:
-        for i, c in enumerate(self._connectors):
-            if c.is_connector_ready():
-                c.on_new_request(request)
-            else:
-                self._ineligible_request_ids_by_connector[i].add(request.request_id)
+        for c in self._connectors:
+            c.request_handler.on_new_request(request)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> MultiKVConnectorMetadata:
-        # Each child only sees the requests it was told about; a child that was
-        # unavailable when a request arrived never observed it.
         metadata = MultiKVConnectorMetadata(
             metadata=tuple(
-                c.build_connector_meta(
-                    scheduler_output.without_requests(
-                        self._ineligible_request_ids_by_connector[i]
-                    )
-                )
-                if c.is_connector_ready()
-                else NoOpKVConnectorMetadata()
-                for i, c in enumerate(self._connectors)
+                c.request_handler.build_connector_meta(scheduler_output)
+                for c in self._connectors
             )
         )
         if self._extra_async_saves:
@@ -607,12 +595,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> tuple[bool, dict[str, Any] | None]:
         async_saves = 0
         kv_txfer_params = None
-        for connector_idx, c in enumerate(self._connectors):
-            if (
-                request.request_id
-                in self._ineligible_request_ids_by_connector[connector_idx]
-            ):
-                continue
+        for c in self._connectors:
             async_save, txfer_params = per_connector_fn(c)
             if async_save:
                 async_saves += 1
@@ -631,8 +614,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             self._extra_async_saves[request.request_id] = async_saves - 1
 
         self._requests_to_connector.pop(request.request_id, None)
-        for request_ids in self._ineligible_request_ids_by_connector:
-            request_ids.discard(request.request_id)
 
         return async_saves > 0, kv_txfer_params
 
@@ -643,7 +624,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> tuple[bool, dict[str, Any] | None]:
         return self._aggregate_request_finished(
             request,
-            lambda c: c.request_finished(request, blocks),
+            lambda c: c.request_handler.request_finished(request, blocks),
         )
 
     def register_finished_partial_tail(
@@ -653,9 +634,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         partial_tail_offloads: list[tuple[int, int, int]],
     ) -> bool:
         accepted = [
-            c.register_finished_partial_tail(request, block_ids, partial_tail_offloads)
-            for i, c in enumerate(self._connectors)
-            if request.request_id not in self._ineligible_request_ids_by_connector[i]
+            c.request_handler.register_finished_partial_tail(
+                request, block_ids, partial_tail_offloads
+            )
+            for c in self._connectors
         ]
         return any(accepted)
 
@@ -673,9 +655,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
         return self._aggregate_request_finished(
             request,
-            lambda c: cast(SupportsHMA, c).request_finished_all_groups(
-                request, block_ids
-            ),
+            lambda c: c.request_handler.request_finished_all_groups(request, block_ids),
         )
 
     def take_events(self) -> Iterable["KVCacheEvent"]:

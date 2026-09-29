@@ -26,7 +26,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
-    NoOpKVConnectorMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
@@ -154,10 +153,6 @@ class Scheduler(SchedulerInterface):
         # will have a corresponding KVConnector with Role=WORKER.
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
         self.connector = None
-        # Requests admitted while the connector is unavailable remain GPU-only
-        # for their lifetime. This prevents later chunks of the same request
-        # from joining a connector that did not observe its earlier chunks.
-        self._connector_ineligible_request_ids: set[str] = set()
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
         self.defer_block_free = False
@@ -338,6 +333,7 @@ class Scheduler(SchedulerInterface):
         )
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
+            self.kv_cache_manager.block_pool.enable_allocation_tracking()
             self.connector.bind_kv_cache_manager(self.kv_cache_manager)
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
@@ -936,10 +932,11 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     did_prefix_cache_lookup = True
-                    if (
+                    connector_eligible = (
                         self.connector is not None
-                        and request_id in self._connector_ineligible_request_ids
-                    ):
+                        and self.connector.request_handler.is_eligible(request_id)
+                    )
+                    if self.connector is not None and not connector_eligible:
                         (
                             new_computed_blocks,
                             num_new_local_computed_tokens,
@@ -955,10 +952,7 @@ class Scheduler(SchedulerInterface):
                         ) = self._get_local_prefix_cache_hit(request)
 
                     # Get externally-cached tokens if using a KVConnector.
-                    if (
-                        self.connector is not None
-                        and request_id not in self._connector_ineligible_request_ids
-                    ):
+                    if self.connector is not None:
                         # Present a block-aligned local hit to the connector so
                         # a strictly longer remote hit can supersede a local
                         # sub-block tail without racing its copy-on-write.
@@ -967,7 +961,7 @@ class Scheduler(SchedulerInterface):
                             num_new_local_computed_tokens - partial_tail
                         )
                         ext_tokens, load_kv_async = (
-                            self.connector.get_num_new_matched_tokens(
+                            self.connector.request_handler.get_num_new_matched_tokens(
                                 request, block_aligned_local
                             )
                         )
@@ -1024,10 +1018,11 @@ class Scheduler(SchedulerInterface):
                                 request.shared_prefix_boundary,
                             ) = self.kv_cache_manager.get_computed_blocks(request)
 
-                        connector_prefix_cache_queries = (
-                            request.num_tokens - num_new_local_computed_tokens
-                        )
-                        connector_prefix_cache_hits = num_external_computed_tokens
+                        if connector_eligible:
+                            connector_prefix_cache_queries = (
+                                request.num_tokens - num_new_local_computed_tokens
+                            )
+                            connector_prefix_cache_hits = num_external_computed_tokens
 
                     # Total computed tokens (local + external).
                     num_computed_tokens = (
@@ -1254,11 +1249,8 @@ class Scheduler(SchedulerInterface):
                 # if a load is needed. Note that
                 # This information is used to determine if a load is
                 # needed for this request.
-                if (
-                    self.connector is not None
-                    and request_id not in self._connector_ineligible_request_ids
-                ):
-                    self.connector.update_state_after_alloc(
+                if self.connector is not None:
+                    self.connector.request_handler.update_state_after_alloc(
                         request,
                         self.kv_cache_manager.get_blocks(request_id),
                         num_external_computed_tokens,
@@ -1439,15 +1431,6 @@ class Scheduler(SchedulerInterface):
         # they cannot be reconstructed from a connector's append-only block
         # table. Drained every step so stale offers cannot accumulate.
         boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
-        if self._connector_ineligible_request_ids:
-            # Requests admitted while the connector was unavailable were never
-            # announced to it, so keep them out of the offered state.
-            boundary_state_offloads = {
-                req_id: entries
-                for req_id, entries in boundary_state_offloads.items()
-                if req_id not in self._connector_ineligible_request_ids
-            }
-
         kv_connector_block_state = None
         if self.connector is not None:
             # Any request scheduled this step can become a connector job now,
@@ -1457,11 +1440,13 @@ class Scheduler(SchedulerInterface):
             block_state_req_ids.update(
                 req_id for req_id in boundary_state_offloads if req_id in self.requests
             )
-            block_state_req_ids -= self._connector_ineligible_request_ids
             kv_connector_block_state = KVConnectorBlockState(
                 req_ids=block_state_req_ids,
                 resolve_block_ids=self.kv_cache_manager.get_block_ids,
                 boundary_state_offloads=boundary_state_offloads,
+                allocated_block_ids=(
+                    self.kv_cache_manager.block_pool.take_allocated_block_ids()
+                ),
             )
 
         kv_cache_block_copies, cow_retained_blocks = (
@@ -1552,14 +1537,7 @@ class Scheduler(SchedulerInterface):
     def _build_kv_connector_meta(
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
-        if not connector.is_connector_ready():
-            return NoOpKVConnectorMetadata()
-        # Requests admitted while the connector was unavailable were never
-        # announced to it, so keep them out of view. The set drains as they
-        # finish, after which this is a no-op.
-        return connector.build_connector_meta(
-            scheduler_output.without_requests(self._connector_ineligible_request_ids)
-        )
+        return connector.request_handler.build_connector_meta(scheduler_output)
 
     def _get_new_block_ids_to_zero(self) -> list[int] | None:
         # Drain new attention block ids every step so the manager-side list
@@ -2618,10 +2596,7 @@ class Scheduler(SchedulerInterface):
                     self.num_spec_tokens
                 )
             if self.connector is not None:
-                if self.connector.is_connector_ready():
-                    self.connector.on_new_request(request)
-                else:
-                    self._connector_ineligible_request_ids.add(request.request_id)
+                self.connector.request_handler.on_new_request(request)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
@@ -2809,8 +2784,13 @@ class Scheduler(SchedulerInterface):
             or self.has_finished_requests()
             or (
                 self.connector is not None
-                and self.connector.is_connector_ready()
-                and self.connector.has_pending_push_work()
+                and (
+                    self.connector.has_pending_init()
+                    or (
+                        self.connector.is_connector_ready()
+                        and self.connector.has_pending_push_work()
+                    )
+                )
             )
             or (
                 self.ec_connector is not None
@@ -2993,10 +2973,6 @@ class Scheduler(SchedulerInterface):
         if self.connector is None:
             return False, None
 
-        if request.request_id in self._connector_ineligible_request_ids:
-            self._connector_ineligible_request_ids.discard(request.request_id)
-            return False, None
-
         finished_partial_tails: list[tuple[int, int, int]] = []
         kv_transfer_config = self.vllm_config.kv_transfer_config
         if kv_transfer_config is not None and kv_transfer_config.is_kv_producer:
@@ -3020,10 +2996,12 @@ class Scheduler(SchedulerInterface):
         )
         partial_tail_delay = False
         if finished_partial_tails:
-            partial_tail_delay = self.connector.register_finished_partial_tail(
-                request,
-                block_ids,
-                finished_partial_tails,
+            partial_tail_delay = (
+                self.connector.request_handler.register_finished_partial_tail(
+                    request,
+                    block_ids,
+                    finished_partial_tails,
+                )
             )
 
         if not isinstance(self.connector, SupportsHMA):
@@ -3032,12 +3010,14 @@ class Scheduler(SchedulerInterface):
             # Hybrid memory allocator should be already turned off for this
             # code path, but let's double-check here.
             assert len(self.kv_cache_config.kv_cache_groups) == 1
-            delay_free, kv_xfer_params = self.connector.request_finished(
-                request, block_ids[0]
+            delay_free, kv_xfer_params = (
+                self.connector.request_handler.request_finished(request, block_ids[0])
             )
         else:
-            delay_free, kv_xfer_params = self.connector.request_finished_all_groups(
-                request, block_ids
+            delay_free, kv_xfer_params = (
+                self.connector.request_handler.request_finished_all_groups(
+                    request, block_ids
+                )
             )
         return delay_free or partial_tail_delay, kv_xfer_params
 

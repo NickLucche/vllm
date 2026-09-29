@@ -193,6 +193,21 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+        # TODO we should avoid this overhead with no KVconnector
+        self._allocated_block_ids: set[int] | None = None
+
+    def enable_allocation_tracking(self) -> None:
+        """Record physical allocations for consumers that fence block reuse."""
+        if self._allocated_block_ids is None:
+            self._allocated_block_ids = set()
+
+    def take_allocated_block_ids(self) -> set[int]:
+        """Drain allocations, leaving previously returned snapshots unchanged."""
+        if self._allocated_block_ids is None:
+            return set()
+        allocated = self._allocated_block_ids
+        self._allocated_block_ids = set()
+        return allocated
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -699,6 +714,8 @@ class BlockPool:
                 block.ref_cnt += 1
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
+        if self._allocated_block_ids is not None:
+            self._allocated_block_ids.update(block.block_id for block in ret)
         return ret
 
     def _notify_reuse(self, blocks: Iterable[KVCacheBlock]) -> None:

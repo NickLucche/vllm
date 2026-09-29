@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -190,6 +190,26 @@ class CachedRequestData:
         num_output_tokens = self._req_id_to_num_output_tokens.get(req_id)
         return num_output_tokens is not None and num_output_tokens == 0
 
+    def without_requests(self, excluded: set[str]) -> "CachedRequestData":
+        """Filter request data while keeping its per-request lists aligned."""
+        if excluded.isdisjoint(self.req_ids):
+            return self
+        keep = [i for i, req_id in enumerate(self.req_ids) if req_id not in excluded]
+        return replace(
+            self,
+            req_ids=[self.req_ids[i] for i in keep],
+            resumed_req_ids=self.resumed_req_ids - excluded,
+            new_token_ids=(
+                [self.new_token_ids[i] for i in keep] if self.new_token_ids else []
+            ),
+            all_token_ids={
+                r: t for r, t in self.all_token_ids.items() if r not in excluded
+            },
+            new_block_ids=[self.new_block_ids[i] for i in keep],
+            num_computed_tokens=[self.num_computed_tokens[i] for i in keep],
+            num_output_tokens=[self.num_output_tokens[i] for i in keep],
+        )
+
     @classmethod
     def make_empty(cls) -> "CachedRequestData":
         return cls(
@@ -221,6 +241,9 @@ class KVConnectorBlockState:
     resolve_block_ids: Callable[[str], tuple[list[int], ...]]
     # Exact Mamba "align" boundary-state hand-offs.
     boundary_state_offloads: dict[str, list[tuple[int, int, int]]]
+    # Global allocations, including requests excluded from connector work.
+    # Connectors must fence pending transfers before these blocks are reused.
+    allocated_block_ids: set[int] = field(default_factory=set)
 
     def get_block_ids(self, req_id: str) -> tuple[list[int], ...] | None:
         if req_id not in self.req_ids:
@@ -315,35 +338,9 @@ class SchedulerOutput:
     num_spec_tokens_to_schedule: int = 0
 
     def without_requests(self, excluded: set[str]) -> "SchedulerOutput":
-        """A copy with `excluded` request ids dropped from every request view.
-
-        Lets the scheduler hide requests a KV connector never observed until ready.
-        """
+        """Filter request work while preserving global block-reuse information."""
         if not excluded:
             return self
-
-        cached = self.scheduled_cached_reqs
-        num_cached = len(cached.req_ids)
-        keep = [i for i, req_id in enumerate(cached.req_ids) if req_id not in excluded]
-        if len(keep) != num_cached:
-
-            def aligned(values: list) -> list:
-                # new_token_ids is empty unless pipeline parallelism is on.
-                return (
-                    [values[i] for i in keep] if len(values) == num_cached else values
-                )
-
-            cached = CachedRequestData(
-                req_ids=[cached.req_ids[i] for i in keep],
-                resumed_req_ids=cached.resumed_req_ids - excluded,
-                new_token_ids=aligned(cached.new_token_ids),
-                all_token_ids={
-                    r: t for r, t in cached.all_token_ids.items() if r not in excluded
-                },
-                new_block_ids=aligned(cached.new_block_ids),
-                num_computed_tokens=aligned(cached.num_computed_tokens),
-                num_output_tokens=aligned(cached.num_output_tokens),
-            )
 
         num_scheduled_tokens = {
             r: n for r, n in self.num_scheduled_tokens.items() if r not in excluded
@@ -353,9 +350,28 @@ class SchedulerOutput:
             scheduled_new_reqs=[
                 r for r in self.scheduled_new_reqs if r.req_id not in excluded
             ],
-            scheduled_cached_reqs=cached,
+            scheduled_cached_reqs=self.scheduled_cached_reqs.without_requests(excluded),
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=sum(num_scheduled_tokens.values()),
+            scheduled_spec_decode_tokens={
+                r: t
+                for r, t in self.scheduled_spec_decode_tokens.items()
+                if r not in excluded
+            },
+            scheduled_encoder_inputs={
+                r: inputs
+                for r, inputs in self.scheduled_encoder_inputs.items()
+                if r not in excluded
+            },
+            num_invalid_spec_tokens=(
+                None
+                if self.num_invalid_spec_tokens is None
+                else {
+                    r: n
+                    for r, n in self.num_invalid_spec_tokens.items()
+                    if r not in excluded
+                }
+            ),
             finished_req_ids=self.finished_req_ids - excluded,
             preempted_req_ids=(
                 None
@@ -374,9 +390,9 @@ class SchedulerOutput:
             kv_connector_block_state=(
                 None
                 if self.kv_connector_block_state is None
-                else KVConnectorBlockState(
+                else replace(
+                    self.kv_connector_block_state,
                     req_ids=self.kv_connector_block_state.req_ids - excluded,
-                    resolve_block_ids=self.kv_connector_block_state.resolve_block_ids,
                     boundary_state_offloads={
                         r: entries
                         for r, entries in (

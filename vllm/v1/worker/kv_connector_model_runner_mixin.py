@@ -98,7 +98,9 @@ class KVConnectorModelRunnerMixin:
 
             if connector_active:
                 transfer_results = kv_connector.get_transfer_results(
-                    scheduler_output.finished_req_ids
+                    connector_metadata.filter_finished_requests(
+                        scheduler_output.finished_req_ids
+                    )
                 )
                 output.finished_sending = transfer_results.finished_sending
                 output.finished_recving = transfer_results.finished_recving

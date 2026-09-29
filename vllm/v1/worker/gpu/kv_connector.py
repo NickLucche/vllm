@@ -115,7 +115,11 @@ class ActiveKVConnector(KVConnector):
             )
             return output
         self.kv_connector.wait_for_save()
-        transfer_results = self.kv_connector.get_transfer_results(finished_req_ids)
+        transfer_results = self.kv_connector.get_transfer_results(
+            self.kv_connector._get_connector_metadata().filter_finished_requests(
+                finished_req_ids
+            )
+        )
         output.finished_sending = transfer_results.finished_sending or None
         output.finished_recving = transfer_results.finished_recving or None
         output.failed_recving = transfer_results.failed_recving
