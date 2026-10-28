@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import replace
@@ -11,6 +12,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import replace as replace_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
@@ -105,6 +107,14 @@ class BaseSpeculator(ABC):
 
 class DraftModelSpeculator(BaseSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        assert vllm_config.speculative_config is not None
+        parallel_config = vllm_config.parallel_config
+        dcp = vllm_config.speculative_config.draft_decode_context_parallel_size
+        if dcp and dcp != parallel_config.decode_context_parallel_size:
+            vllm_config = copy.copy(vllm_config)
+            vllm_config.parallel_config = replace_config(
+                parallel_config, decode_context_parallel_size=dcp
+            )
         self.vllm_config = vllm_config
         self.device = device
 

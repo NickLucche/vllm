@@ -179,7 +179,7 @@ class PCPManager:
                 dcp_size = parallel_config.decode_context_parallel_size
                 if (
                     dcp_size not in (1, pcp_size)
-                    and speculative_config.draft_model_config.use_mla
+                    and speculative_config.draft_decode_context_parallel_size != 1
                 ):
                     raise NotImplementedError(
                         "MRV2 PCP DSpark requires DCP=1 or DCP=PCP; got "
