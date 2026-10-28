@@ -3,7 +3,7 @@
 """KV cache planning: grouping, sizing, and memory-fit logic."""
 
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from functools import partial, reduce
@@ -358,7 +358,8 @@ def unify_kv_cache_spec_page_size(
     be padded by its own row-aligned ``alignment``, not to an arbitrary page
     size. Raise NotImplementedError if failed to unify the page size;
     ``get_kv_cache_groups`` catches it to try the full-allocation fallback
-    (e.g. MLA next to an incompatible sliding-window draft).
+    (e.g. MLA next to an incompatible sliding-window draft) or one group per
+    uniform type.
 
     Args:
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
@@ -571,21 +572,32 @@ def _get_layer_block_stride(spec: KVCacheSpec) -> int:
     return round_up(spec.page_size_bytes, spec.get_block_stride_alignment())
 
 
+def _get_layer_outer_regions(kv_cache_groups: list[KVCacheGroupSpec]) -> dict[int, int]:
+    """Map each layer block stride to the number of layer-outer regions it needs.
+
+    Groups alias regions: a group's k-th layer of a given block stride uses the
+    k-th region of that stride. A block ID belongs to one group at a time, so
+    layers sharing a region need equal block strides to keep blocks apart.
+    """
+    regions: dict[int, int] = {}
+    for group in kv_cache_groups:
+        counts = Counter(
+            _get_layer_block_stride(_get_per_layer_spec(group, layer_name))
+            for layer_name in group.layer_names
+        )
+        for block_stride, count in counts.items():
+            regions[block_stride] = max(regions.get(block_stride, 0), count)
+    return regions
+
+
 def _get_kv_cache_bytes_per_block(
     kv_cache_groups: list[KVCacheGroupSpec], layout: KVCacheLayout
 ) -> int:
-    """Return the largest cache group's bytes per block."""
-    if _is_windowed_dspark_config(kv_cache_groups):
-        allocations = _windowed_dspark_allocations(kv_cache_groups)
-        return sum(page_size for page_size, _ in allocations)
+    """Return the bytes one block ID spans across all KV cache groups."""
     if not layout.is_block_outermost:
-        # Each layer's block stride is its own padded page.
-        return max(
-            sum(
-                _get_layer_block_stride(_get_per_layer_spec(group, layer_name))
-                for layer_name in group.layer_names
-            )
-            for group in kv_cache_groups
+        return sum(
+            block_stride * count
+            for block_stride, count in _get_layer_outer_regions(kv_cache_groups).items()
         )
     bytes_per_block = max(
         sum(
@@ -628,119 +640,15 @@ def validate_kv_cache_layout(
         # A rectangular layer dim exists; every layout can express it.
         return
 
-    # Mixed page sizes pack pages side by side within a block, which needs each page
-    # to be one contiguous chunk inside its block (a block-compact layout) and, with
-    # multiple KV cache groups, the layer dim inside the block dim.
-    if not layout.is_block_compact or (
-        len(kv_cache_groups) > 1 and layout.is_layer_compact
-    ):
+    # Mixed page sizes need each page to be one contiguous chunk (a block-compact
+    # layout).
+    if not layout.is_block_compact:
         raise ValueError(
             f"KV cache layout {layout.name} cannot express this model's "
             f"mixed page sizes ({sorted(page_sizes)}); a backend should "
             "declare block-outermost supported layouts (e.g. BLHNC), or "
             "set VLLM_KV_CACHE_LAYOUT=BLHNC."
         )
-
-
-def _is_windowed_dspark_draft_spec(spec: KVCacheSpec) -> bool:
-    return isinstance(spec, SlidingWindowMLASpec) and spec.non_causal_multi_token_decode
-
-
-def _get_windowed_dspark_groups(
-    kv_cache_spec: dict[str, KVCacheSpec],
-) -> list[KVCacheGroupSpec] | None:
-    """One group for the target, one per window for sliding-window DSpark drafts.
-
-    The non-windowed target layers must form one uniform-type group (e.g. a
-    sparse MLA target with its indexer caches). See
-    ``_get_windowed_dspark_kv_cache_tensors`` for the allocation.
-    """
-    draft_specs: defaultdict[tuple[int, int], dict[str, KVCacheSpec]] = defaultdict(
-        dict
-    )
-    target_specs: dict[str, KVCacheSpec] = {}
-    for name, spec in kv_cache_spec.items():
-        if _is_windowed_dspark_draft_spec(spec):
-            key = (spec.block_size, spec.sliding_window)  # type: ignore[attr-defined]
-            draft_specs[key][name] = spec
-        else:
-            target_specs[name] = spec
-    if not draft_specs or not target_specs:
-        return None
-    target_group_spec = UniformTypeKVCacheSpecs.from_specs(target_specs)
-    if target_group_spec is None:
-        return None
-    groups = [KVCacheGroupSpec(list(target_specs), target_group_spec)]
-    for specs in draft_specs.values():
-        group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
-        assert group_spec is not None
-        groups.append(KVCacheGroupSpec(list(specs), group_spec))
-    return groups
-
-
-def _is_windowed_dspark_config(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
-    return len(kv_cache_groups) > 1 and all(
-        all(
-            _is_windowed_dspark_draft_spec(spec)
-            for spec in iter_layer_specs(group.kv_cache_spec)
-        )
-        for group in kv_cache_groups[1:]
-    )
-
-
-def _windowed_dspark_allocations(
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> list[tuple[int, list[str]]]:
-    """Give every target layer a contiguous cache; draft layers alias one with
-    the same page size, else get their own.
-
-    Draft and target groups have separate block tables over one block pool, so
-    their live pages never overlap. Contiguous per-layer caches keep the sparse
-    MLA indexer's flat row view valid.
-    """
-    allocations: list[tuple[int, list[str]]] = [
-        (_get_per_layer_spec(kv_cache_groups[0], name).page_size_bytes, [name])
-        for name in kv_cache_groups[0].layer_names
-    ]
-    for group in kv_cache_groups[1:]:
-        free = allocations.copy()
-        for name in group.layer_names:
-            page_size = _get_per_layer_spec(group, name).page_size_bytes
-            shared = next((a for a in free if a[0] == page_size), None)
-            if shared is None:
-                allocations.append((page_size, [name]))
-            else:
-                shared[1].append(name)
-                free.remove(shared)
-    return allocations
-
-
-def _get_windowed_dspark_kv_cache_tensors(
-    vllm_config: VllmConfig,
-    kv_cache_groups: list[KVCacheGroupSpec],
-    available_memory: int,
-) -> tuple[int, list[KVCacheTensor]]:
-    allocations = _windowed_dspark_allocations(kv_cache_groups)
-    bytes_per_block = sum(page_size for page_size, _ in allocations)
-    num_blocks = may_override_num_blocks(
-        vllm_config, available_memory // bytes_per_block
-    )
-    size = bytes_per_block * num_blocks
-    tensors: list[KVCacheTensor] = []
-    offset = 0
-    for page_size, layer_names in allocations:
-        tensors.extend(
-            KVCacheTensor(
-                size=size,
-                layers=[name],
-                layer_stride=page_size * num_blocks,
-                block_stride=page_size,
-                offset=offset,
-            )
-            for name in layer_names
-        )
-        offset += page_size * num_blocks
-    return num_blocks, tensors
 
 
 def get_kv_cache_config_from_groups(
@@ -777,19 +685,6 @@ def get_kv_cache_config_from_groups(
             vllm_config, kv_cache_groups, available_memory, host_budget
         )
 
-    if _is_windowed_dspark_config(kv_cache_groups):
-        num_blocks, kv_cache_tensors = _get_windowed_dspark_kv_cache_tensors(
-            vllm_config, kv_cache_groups, available_memory
-        )
-        return KVCacheConfig(
-            num_blocks=num_blocks,
-            kv_cache_tensors=kv_cache_tensors,
-            kv_cache_groups=kv_cache_groups,
-            prefix_cache_retention_interval=(
-                vllm_config.cache_config.prefix_cache_retention_interval
-            ),
-        )
-
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, kv_cache_groups)
     bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups, layout)
@@ -806,9 +701,17 @@ def get_kv_cache_config_from_groups(
     # group 1: | blk 0 [  C  |    D   ] | blk 1 [  C  |    D   ] | ...
     #          |<--- bytes_per_block -->|
     #
-    # layer-outer (only supported for uniform page sizes or single-group models):
-    # group 0: | A [ blk 0 | blk 1 | ... ] | B [ blk 0 | blk 1 | ... ] |
+    # layer-outer (a group's k-th layer of a block stride takes that stride's k-th
+    # region; see _get_layer_outer_regions):
+    # group 0: | A [ blk 0 | blk 1 | ... ] | B [ blk 0 | blk 1 | ... ] | E [ b0 | b1 ] |
     # group 1: | C [ blk 0 | blk 1 | ... ] | D [ blk 0 | blk 1 | ... ] |
+
+    region_offsets: dict[int, int] = {}
+    if not layout.is_block_outermost:
+        region_offset = 0
+        for page_stride, count in _get_layer_outer_regions(kv_cache_groups).items():
+            region_offsets[page_stride] = region_offset
+            region_offset += page_stride * num_blocks * count
 
     kv_cache_tensors = []
     for group in kv_cache_groups:
@@ -821,6 +724,7 @@ def get_kv_cache_config_from_groups(
             layers_by_spec[group_spec].extend(group.layer_names)
 
         byte_offset = 0
+        next_region: Counter[int] = Counter()
         for spec, layer_names in layers_by_spec.items():
             block_stride = interleaved_block_stride
             padded_page = _get_layer_block_stride(spec)
@@ -834,18 +738,24 @@ def get_kv_cache_config_from_groups(
                 layout,
                 fixed_strides=(None, block_stride, None, None, None),
             )
+            if layout.is_block_outermost:
+                offset = byte_offset
+                byte_offset += len(layer_names) * spec.page_size_bytes
+            else:
+                assert layer_stride == padded_page * num_blocks
+                offset = (
+                    region_offsets[padded_page]
+                    + next_region[padded_page] * layer_stride
+                )
+                next_region[padded_page] += len(layer_names)
             kv_cache_tensors.append(
                 KVCacheTensor(
                     size=size,
                     layers=layer_names,
                     layer_stride=layer_stride,
                     block_stride=block_stride,
-                    offset=byte_offset,
+                    offset=offset,
                 )
-            )
-            # Block-outer layers share each block; layer-outer ones own regions.
-            byte_offset += len(layer_names) * (
-                spec.page_size_bytes if layout.is_block_outermost else layer_stride
             )
 
     return KVCacheConfig(
@@ -1028,6 +938,27 @@ def _approximate_gcd(values: Sequence[int], *, lower_bound: int | None = None) -
     return best_d
 
 
+def _bucket_uniform_type_specs(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[UniformTypeKVCacheSpecs]:
+    """Greedily bucket layers into uniform-type specs."""
+    buckets: list[dict[str, KVCacheSpec]] = []
+    for name, spec in kv_cache_spec.items():
+        for bucket in buckets:
+            candidate = {**bucket, name: spec}
+            if UniformTypeKVCacheSpecs.is_uniform_type(candidate):
+                bucket[name] = spec
+                break
+        else:
+            buckets.append({name: spec})
+    uniform_specs = []
+    for bucket in buckets:
+        uniform_spec = UniformTypeKVCacheSpecs.from_specs(bucket)
+        assert uniform_spec is not None
+        uniform_specs.append(uniform_spec)
+    return uniform_specs
+
+
 def _get_packed_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -1048,22 +979,10 @@ def _get_packed_kv_cache_groups(
     if not layout.is_block_outermost or len(page_sizes) <= 1:
         return None
 
-    buckets: list[dict[str, KVCacheSpec]] = []
-    for name, spec in kv_cache_spec.items():
-        for bucket in buckets:
-            candidate = {**bucket, name: spec}
-            if UniformTypeKVCacheSpecs.is_uniform_type(candidate):
-                bucket[name] = spec
-                break
-        else:
-            buckets.append({name: spec})
-
     bucketed = []
-    for bucket in buckets:
-        uniform_spec = UniformTypeKVCacheSpecs.from_specs(bucket)
-        assert uniform_spec is not None
+    for uniform_spec in _bucket_uniform_type_specs(kv_cache_spec):
         page_size_layers: dict[int, list[str]] = defaultdict(list)
-        for layer_name, layer_spec in bucket.items():
+        for layer_name, layer_spec in uniform_spec.kv_cache_specs.items():
             page_size_layers[layer_spec.page_size_bytes].append(layer_name)
         # Only 1:1 patterns (one layer of each page size per repeat) are
         # supported; counts sharing a gcd > 1 (e.g. 2:1) could in principle
@@ -1262,8 +1181,6 @@ def get_kv_cache_groups(
         # full attention, or all layers are sliding window attention with the
         # same window size). Put all layers into one group.
         return _get_kv_cache_groups_uniform_type(uniform_spec)
-    elif dspark_groups := _get_windowed_dspark_groups(kv_cache_spec):
-        return dspark_groups
     # Hidden-state layers use their own block table and must not be absorbed
     # into a compatible attention bucket.
     hidden_specs = {
@@ -1284,14 +1201,20 @@ def get_kv_cache_groups(
         return packed_groups
 
     # Prefer preserving each layer's cache semantics. If physical pages cannot
-    # be unified, try a supported allocation-only fallback before failing.
+    # be unified, try a supported allocation-only fallback, then one group per
+    # uniform type with each layer keeping its own page size.
     try:
         filtered_spec = unify_kv_cache_spec_page_size(filtered_spec)
     except NotImplementedError:
         fallback_groups = _try_get_full_allocation_fallback_groups(kv_cache_spec)
-        if fallback_groups is None:
+        if fallback_groups is not None:
+            return fallback_groups
+        if hidden_specs:
             raise
-        return fallback_groups
+        return [
+            KVCacheGroupSpec(list(spec.kv_cache_specs), spec)
+            for spec in _bucket_uniform_type_specs(filtered_spec)
+        ]
     groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
 
     # Add hidden-state layers back with page aligned to the common page.
