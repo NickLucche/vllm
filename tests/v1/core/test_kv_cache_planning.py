@@ -1467,47 +1467,74 @@ def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
     )
 
 
-def test_windowed_dspark_draft_gets_own_group_and_contiguous_caches():
-    """Sliding-window DSpark draft layers (non-causal marker) next to a sparse
-    MLA target: the target stays one group and every layer gets a contiguous
-    per-layer cache; the bf16 draft cannot alias the target's pages."""
-    target = new_mla_spec(cache_dtype_str="fp8_ds_mla", block_size=64)
+@pytest.mark.parametrize(
+    ("target_attn", "draft_shares_target_regions"),
+    [
+        (replace(new_mla_spec(block_size=64), dtype=torch.bfloat16), True),
+        (
+            MLAAttentionSpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=656,
+                dtype=torch.uint8,
+                cache_dtype_str="fp8_ds_mla",
+            ),
+            False,
+        ),
+    ],
+    ids=["bf16_target", "fp8_ds_mla_target"],
+)
+def test_swa_mla_draft_next_to_sparse_mla_target(
+    target_attn, draft_shares_target_regions
+):
+    """A sliding-window MLA draft next to a sparse MLA target whose pages cannot
+    be unified gets its own group. Every layer keeps a contiguous cache, and a
+    draft layer shares a target layer's region only when their pages match."""
     draft = replace(
-        new_swa_mla_spec(sliding_window=36),
-        block_size=64,
-        dtype=torch.bfloat16,
-        non_causal_multi_token_decode=True,
+        new_swa_mla_spec(sliding_window=36), block_size=64, dtype=torch.bfloat16
     )
     specs = {
-        "target.0.attn": target,
-        "target.0.indexer.k_cache": new_indexer_mla_spec(block_size=64),
-        "target.1.attn": target,
+        "target.0.attn": target_attn,
+        "target.0.indexer": new_indexer_mla_spec(block_size=64),
+        "target.1.attn": target_attn,
         "draft.2.attn": draft,
         "draft.3.attn": draft,
     }
     config = _grouping_config()
     groups = get_kv_cache_groups(config, specs)
-    assert [g.layer_names for g in groups] == [
-        ["target.0.attn", "target.0.indexer.k_cache", "target.1.attn"],
-        ["draft.2.attn", "draft.3.attn"],
-    ]
+    assert [g.layer_names for g in groups] == [list(specs)[:3], list(specs)[3:]]
 
     config.cache_config.num_gpu_blocks_override = None
     config.cache_config.prefix_cache_retention_interval = None
     config.attention_config = SimpleNamespace(hisparse_config=None)
-    pages = [spec.page_size_bytes for spec in specs.values()]
-    kv_config = kv_cache_planning.get_kv_cache_config_from_groups(
-        config, groups, available_memory=10 * sum(pages)
+    target_page = target_attn.page_size_bytes
+    indexer_page = specs["target.0.indexer"].page_size_bytes
+    draft_page = draft.page_size_bytes
+    assert (draft_page == target_page) == draft_shares_target_regions
+    target_bytes = 2 * target_page + indexer_page
+    bytes_per_block = target_bytes + (
+        0 if draft_shares_target_regions else 2 * draft_page
     )
-    assert kv_config.num_blocks == 10
-    tensors = {t.layers[0]: t for t in kv_config.kv_cache_tensors}
-    assert [len(t.layers) for t in kv_config.kv_cache_tensors] == [1] * len(specs)
-    offset = 0
-    for name, spec in specs.items():
-        assert tensors[name].offset == offset
-        assert tensors[name].block_stride == spec.page_size_bytes
-        offset += spec.page_size_bytes * 10
-    assert kv_cache_planning._pool_bytes_per_block(config, groups) == sum(pages)
+    num_blocks = 10
+    kv_config = kv_cache_planning.get_kv_cache_config_from_groups(
+        config, groups, available_memory=num_blocks * bytes_per_block
+    )
+    assert kv_config.num_blocks == num_blocks
+    assert kv_cache_planning._pool_bytes_per_block(config, groups) == bytes_per_block
+
+    layer_offsets = {}
+    for tensor in kv_config.kv_cache_tensors:
+        for i, name in enumerate(tensor.layers):
+            assert tensor.block_stride == specs[name].page_size_bytes
+            layer_offsets[name] = tensor.offset + i * tensor.layer_stride
+    draft_offset = 0 if draft_shares_target_regions else target_bytes * num_blocks
+    assert layer_offsets == {
+        "target.0.attn": 0,
+        "target.1.attn": target_page * num_blocks,
+        "target.0.indexer": 2 * target_page * num_blocks,
+        "draft.2.attn": draft_offset,
+        "draft.3.attn": draft_offset + draft_page * num_blocks,
+    }
 
 
 def test_mla_with_incompatible_swa_uses_one_full_allocation_group(caplog_vllm):

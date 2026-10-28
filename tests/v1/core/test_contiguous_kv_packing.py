@@ -577,19 +577,25 @@ class TestDensePacking:
         assert idx_tensor.offset == mla_page * config.num_blocks
         _bind(config, "LBNHC")
 
-    def test_overlaid_groups_alias_and_stay_isolated(self):
+    @pytest.mark.parametrize("layout", ["BLNHC", "LBNHC"])
+    def test_overlaid_groups_alias_and_stay_isolated(self, layout):
         groups, g1, g2 = _mixed_page_groups()
-        # Overlay models resolve to a block-outer layout at backend selection (the
-        # model's backend declares it); mirror that here.
+        # Block-outer packs every group into the widest group's block. Layer-outer
+        # gives each page size as many regions as the group using it most: five
+        # 512-head pages (g2) and three 128-head pages (g1).
+        bytes_per_block = {
+            "BLNHC": _expected_bytes_per_block(groups),
+            "LBNHC": 5 * _mla(512).page_size_bytes + 3 * _mla(128).page_size_bytes,
+        }[layout]
         config = get_kv_cache_config_from_groups(
-            _mock_vllm_config("BLNHC"), groups, MEMORY
+            _mock_vllm_config(layout), groups, MEMORY
         )
-        assert config.num_blocks == MEMORY // _expected_bytes_per_block(groups)
-        assert _pool_bytes_per_block(
-            _mock_vllm_config("BLNHC"), groups
-        ) == _expected_bytes_per_block(groups)
+        assert config.num_blocks == MEMORY // bytes_per_block
+        assert _pool_bytes_per_block(_mock_vllm_config(layout), groups) == (
+            bytes_per_block
+        )
 
-        views = _bind(config, "BLNHC")
+        views = _bind(config, layout)
         assert set(views) == set(g1) | set(g2)
         assert views["swa.0"].data_ptr() == views["mla.0"].data_ptr()
 
@@ -611,16 +617,6 @@ class TestDensePacking:
         views["mla.0"][0].fill_(77)
         for i, name in enumerate(list(g1)[1:], start=1):
             assert (views[name][0].to(torch.int32) == i + 1).all()
-
-    def test_layer_compact_layout_rejected_for_overlaid_groups(self):
-        # The layout has a single writer (backend-selection resolution); a layer-
-        # compact layout reaching an overlay model's allocation is an error, not a
-        # silent flip.
-        groups, _, _ = _mixed_page_groups()
-        with pytest.raises(
-            ValueError, match="cannot express this model's mixed page sizes"
-        ):
-            get_kv_cache_config_from_groups(_mock_vllm_config("LBNHC"), groups, MEMORY)
 
     def test_unresolved_layout_rejected(self):
         groups, _, _ = _mixed_page_groups()
