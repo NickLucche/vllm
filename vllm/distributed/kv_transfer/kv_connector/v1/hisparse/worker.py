@@ -8,6 +8,7 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
+from itertools import chain
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
@@ -23,6 +24,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.backend import get_hisparse_backend
+from vllm.v1.hisparse.binding import get_kv_sharing_readers
 from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
@@ -185,6 +187,9 @@ def _create_hisparse_host_events(
 class HiSparseConnectorWorker:
     """Own HiSparse host/hot state and execute its worker-side transfers."""
 
+    _in_step = False
+    kv_sharing_handles: tuple[HiSparseCacheHandle, ...] = ()
+
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> None:
         self.backend = get_hisparse_backend()
         self.vllm_config = vllm_config
@@ -206,6 +211,9 @@ class HiSparseConnectorWorker:
 
         if not cache_handles:
             raise RuntimeError("HiSparse connector found no hot-cache handles.")
+        self.kv_sharing_handles = tuple(
+            chain.from_iterable(get_kv_sharing_readers(forward_context).values())
+        )
         hot_backings: dict[int, torch.Tensor] = {}
         host_pools: dict[int, HiSparseHostPool] = {}
         for cache in cache_handles:
@@ -419,7 +427,10 @@ class HiSparseConnectorWorker:
             self._slot_mapping_staging.candidates = mirrors
         self._set_row_mirrors(mirrors)
         self._clear_forward_mirror_state()
+        self._in_step = True
         for handle in self.cache_handles:
+            handle.all_context_pages_resident = metadata.all_context_pages_resident
+        for handle in self.kv_sharing_handles:
             handle.all_context_pages_resident = metadata.all_context_pages_resident
         self._copy_host_blocks(metadata.host_block_copies, previous_host_write_event)
         transfers = (
@@ -690,7 +701,8 @@ class HiSparseConnectorWorker:
 
     def _enqueue_layer_mirror(self, layer_index: int) -> None:
         handle = self.cache_handles[layer_index]
-        if not handle.host_mirror_required:
+        # CUDA graph warmup and capture run forwards outside any step.
+        if not handle.host_mirror_required or not self._in_step:
             return
         if layer_index in self._per_layer_mirrored:
             raise RuntimeError(f"HiSparse layer {layer_index} mirrored twice.")
@@ -919,6 +931,7 @@ class HiSparseConnectorWorker:
             self._resolve_row_mirrors(state)
         self._enqueue_host_mirror(ready_event)
         self._clear_forward_mirror_state()
+        self._in_step = False
 
     def finish_forward(self) -> None:
         compute_stream = torch.accelerator.current_stream()

@@ -95,7 +95,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(index_topk=128),
+            hf_text_config=SimpleNamespace(index_topk=128),
             max_model_len=gpu_block_size,
         ),
         parallel_config=SimpleNamespace(
@@ -1537,6 +1537,33 @@ def test_windowed_dspark_draft_keeps_its_dcp_layout(draft_dcp_sharded):
         ["draft.2.attn", "draft.3.attn"],
     ]
     assert [g.kv_cache_spec.dcp_sharded for g in groups] == [True, draft_dcp_sharded]
+
+
+def test_windowed_dspark_draft_without_dcp_joins_sparse_mla_target_group():
+    """Mistral Large 4 shape without DCP: the sliding-window DSpark draft is
+    promoted to full-attention allocation in the target's group (its attention
+    compute stays windowed)."""
+    target = new_mla_spec(cache_dtype_str="fp8_ds_mla", block_size=64)
+    draft = replace(
+        new_swa_mla_spec(sliding_window=36),
+        block_size=64,
+        dtype=torch.bfloat16,
+        non_causal_multi_token_decode=True,
+    )
+    specs = {
+        "target.0.attn": target,
+        "target.0.indexer.k_cache": new_indexer_mla_spec(block_size=64),
+        "target.1.attn": target,
+        "draft.2.attn": draft,
+        "draft.3.attn": draft,
+    }
+    config = _grouping_config()
+    config.cache_config.kv_cache_layout = "LBNHC"
+    groups = get_kv_cache_groups(config, specs)
+    assert len(groups) == 1 and set(groups[0].layer_names) == set(specs)
+    promoted = groups[0].kv_cache_spec.kv_cache_specs["draft.2.attn"]
+    assert type(promoted) is MLAAttentionSpec
+    assert promoted.sliding_window == 36 and promoted.non_causal_multi_token_decode
 
 
 @pytest.mark.parametrize(
