@@ -681,6 +681,13 @@ class GPUModelRunner(
         self.use_async_spec_decode = (
             self.use_async_scheduling and self.num_spec_tokens > 0
         )
+        if current_platform.is_cuda_alike():
+            # apply_grammar_bitmask launches xgrammar's Triton kernel.
+            from vllm.v1.structured_output.xgrammar_bitmask import (
+                _apply_token_bitmask_inplace,
+            )
+
+            _apply_token_bitmask_inplace.register_warmup()
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
