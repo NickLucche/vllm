@@ -776,6 +776,8 @@ def test_free_kv_cache_block_queue_scramble(monkeypatch):
             monkeypatch.setenv("VLLM_KV_SCRAMBLE_BLOCKS", seed)
         blocks = [KVCacheBlock(block_id=i) for i in range(64)]
         queue = FreeKVCacheBlockQueue(blocks)
+        # The caller's list stays indexable by block_id.
+        assert [b.block_id for b in blocks] == list(range(64))
         return [b.block_id for b in queue.get_all_free_blocks()]
 
     # Unset or 0: disabled, preserve the original block_id order.
@@ -786,6 +788,8 @@ def test_free_kv_cache_block_queue_scramble(monkeypatch):
     scrambled = block_ids("1")
     assert sorted(scrambled) == list(range(64))
     assert scrambled != list(range(64))
+    # Block 0 is popped first, as the null block.
+    assert scrambled[0] == 0
 
     # Reproducible: same seed -> same permutation; different seed -> different.
     assert block_ids("1") == scrambled
