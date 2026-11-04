@@ -2149,4 +2149,4 @@ def test_push_handshake_rejects_different_block_sizes(
     worker.pcp_size = 1
 
     with pytest.raises(NotImplementedError, match="identical P/D block sizes"):
-        worker._validate_remote_parallel_config(metadata)
+        worker._validate_remote_agent_metadata(metadata, remote_tp_size=1)

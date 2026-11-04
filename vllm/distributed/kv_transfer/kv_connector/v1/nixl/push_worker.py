@@ -136,10 +136,12 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._push_writer_stop = threading.Event()
         self._push_writer_thread: threading.Thread | None = None
 
-    def _validate_remote_parallel_config(
-        self, agent_metadata: NixlAgentMetadata
+    # --- Handshake validation ----------------------------------------- #
+
+    def _validate_remote_agent_metadata(
+        self, agent_metadata: NixlAgentMetadata, remote_tp_size: int
     ) -> None:
-        super()._validate_remote_parallel_config(agent_metadata)
+        super()._validate_remote_agent_metadata(agent_metadata, remote_tp_size)
         local = (self.block_size, self._physical_blocks_per_logical_kv_block)
         remote = (
             agent_metadata.block_size,
@@ -152,22 +154,21 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 f"{local}, remote engine {agent_metadata.engine_id} {remote}."
             )
 
-    # --- Lifecycle ----------------------------------------------------- #
-
-    def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor"]):
-        super().register_kv_caches(kv_caches)
-        if self._mixed_mem_types:
+    def _validate_remote_xfer_agent(
+        self, nixl_agent_meta: NixlAgentMetadata, remote_tp_size: int
+    ) -> None:
+        assert self.transfer_topo is not None
+        if (
+            self.pp_size > 1
+            and (self._is_hma_required or self._has_packed_cache)
+            and remote_tp_size > self.transfer_topo.tp_size
+            and not self.use_mla
+        ):
             raise NotImplementedError(
-                "NixlPushConnector does not support mixed-memory KV caches"
+                "Attention-HMA push does not support decode TP greater than "
+                "prefill TP yet"
             )
-        if self._push_writer_thread is None:
-            self._push_writer_thread = threading.Thread(
-                target=self._push_writer_loop,
-                daemon=True,
-                name="nixl-push-writer",
-            )
-            self._push_writer_thread.start()
-            logger.info("nixl-push-writer thread started (rank=%d)", self.tp_rank)
+        super()._validate_remote_xfer_agent(nixl_agent_meta, remote_tp_size)
 
     def _validate_remote_agent_handshake(
         self,
@@ -188,6 +189,23 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 "NIXL push mode does not support a head-sharded draft's KV "
                 "under an MLA target with heterogeneous TP. Use pull mode."
             )
+
+    # --- Lifecycle ----------------------------------------------------- #
+
+    def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor"]):
+        super().register_kv_caches(kv_caches)
+        if self._mixed_mem_types:
+            raise NotImplementedError(
+                "NixlPushConnector does not support mixed-memory KV caches"
+            )
+        if self._push_writer_thread is None:
+            self._push_writer_thread = threading.Thread(
+                target=self._push_writer_loop,
+                daemon=True,
+                name="nixl-push-writer",
+            )
+            self._push_writer_thread.start()
+            logger.info("nixl-push-writer thread started (rank=%d)", self.tp_rank)
 
     def shutdown(self) -> None:
         self._push_writer_stop.set()

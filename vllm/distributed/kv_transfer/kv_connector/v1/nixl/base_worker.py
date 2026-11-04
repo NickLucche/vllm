@@ -1107,27 +1107,6 @@ class NixlBaseConnectorWorker:
             "enforce_handshake_compat", True
         )
 
-    def _validate_remote_parallel_config(
-        self, agent_metadata: NixlAgentMetadata
-    ) -> None:
-        local_pcp_size = self.pcp_size
-        local_dcp_size = self.dcp_size
-        remote_pcp_size = agent_metadata.pcp_size
-        remote_dcp_size = agent_metadata.dcp_size
-        if remote_pcp_size > 1 and remote_dcp_size not in (1, remote_pcp_size):
-            raise NotImplementedError(
-                "Remote NixlConnector PCP+DCP does not span the full PCP group. "
-                f"Remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
-            )
-        if (local_pcp_size > 1 and local_dcp_size == 1 and remote_dcp_size > 1) or (
-            remote_pcp_size > 1 and remote_dcp_size == 1 and local_dcp_size > 1
-        ):
-            raise NotImplementedError(
-                "Replicated PCP cannot be paired with a DCP-sharded NIXL peer. "
-                f"Local PCP/DCP={local_pcp_size}/{local_dcp_size}; "
-                f"remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
-            )
-
     def _sync_block_size_with_kernel(self) -> None:
         backends, specs = get_current_attn_backends_and_specs(
             self.vllm_config, self.kv_cache_config, self.attn_backends
@@ -1152,24 +1131,6 @@ class NixlBaseConnectorWorker:
             self.block_size = kernel_block_size
             self.num_blocks *= self._physical_blocks_per_logical_kv_block
 
-    def _validate_csa_linear_tp_layout(self, remote_tp_size: int) -> None:
-        """Reject P/D pairs whose main-KV pages have different head layouts.
-
-        A rank at TP < total KV heads holds several heads per page, while a
-        rank at TP >= total KV heads holds exactly one (replicated beyond
-        that). CSA-linear pages are shared tensors that transfer as whole
-        block units, so endpoints on opposite sides of that boundary lay
-        them out differently and cannot exchange them.
-        """
-        assert self.transfer_topo is not None
-        total_kv_heads = self.transfer_topo.total_num_kv_heads
-        if (self.world_size < total_kv_heads) != (remote_tp_size < total_kv_heads):
-            raise ValueError(
-                "CSA-linear NIXL requires both endpoints on the same side of "
-                f"the KV-head sharding boundary ({total_kv_heads} KV heads): "
-                f"got local TP {self.world_size}, remote TP {remote_tp_size}."
-            )
-
     def _nixl_handshake(
         self,
         host: str,
@@ -1181,9 +1142,6 @@ class NixlBaseConnectorWorker:
         notif_agents_only: bool = False,
     ) -> tuple[dict[tuple[int, int], str], float]:
         """Do a NIXL handshake with a remote instance."""
-        if self._is_csa_linear:
-            self._validate_csa_linear_tp_layout(remote_tp_size)
-
         # the first time we connect to a remote agent.
         # be careful, the handshake happens in a background thread.
         # it does not have an active cuda context until any cuda runtime
@@ -1295,7 +1253,7 @@ class NixlBaseConnectorWorker:
                         f"Failed to decode NixlAgentMetadata. Error: {e}"
                     ) from e
 
-                self._validate_remote_parallel_config(metadata)
+                self._validate_remote_agent_metadata(metadata, remote_tp_size)
 
                 # Ensure engine id matches.
                 if metadata.engine_id != expected_engine_id:
@@ -2516,26 +2474,7 @@ class NixlBaseConnectorWorker:
 
         assert self.transfer_topo is not None
         transfer_topo = self.transfer_topo
-        if (
-            self._supports_pp_hma
-            and self.pp_size > 1
-            and (self._is_hma_required or self._has_packed_cache)
-            and remote_tp_size > transfer_topo.tp_size
-            and not self.use_mla
-        ):
-            raise NotImplementedError(
-                "Attention-HMA push does not support decode TP greater than "
-                "prefill TP yet"
-            )
-        if (
-            self._packed_member_layouts
-            and self._packed_member_layouts != nixl_agent_meta.packed_member_layouts
-        ):
-            # Whole rows transfer as one unit, so both sides must pack them alike.
-            raise RuntimeError(
-                "Packed KV block rows differ between P and D. Use the same "
-                "VLLM_KV_CACHE_LAYOUT and block size on both sides."
-            )
+        self._validate_remote_xfer_agent(nixl_agent_meta, remote_tp_size)
         pairs = self._pair_regions(nixl_agent_meta)
         if self._dst_pairs.setdefault(engine_id, pairs) != pairs:
             raise RuntimeError(
@@ -2724,6 +2663,69 @@ class NixlBaseConnectorWorker:
         )
 
         return remote_agent_name
+
+    # --- Handshake validation ----------------------------------------- #
+    # Peers are validated in three steps, in handshake order:
+    #   1. _validate_remote_agent_metadata: every handshake, notification-only
+    #      ones included, before the peer is registered.
+    #   2. _validate_remote_xfer_agent: in add_remote_agent, before the peer's
+    #      regions are paired or anything is registered.
+    #   3. _validate_remote_agent_handshake: in add_remote_agent, once the peer
+    #      is registered in the transfer topology; checks region geometry.
+
+    def _validate_remote_agent_metadata(
+        self, agent_metadata: NixlAgentMetadata, remote_tp_size: int
+    ) -> None:
+        if self._is_csa_linear:
+            self._validate_csa_linear_tp_layout(remote_tp_size)
+        local_pcp_size = self.pcp_size
+        local_dcp_size = self.dcp_size
+        remote_pcp_size = agent_metadata.pcp_size
+        remote_dcp_size = agent_metadata.dcp_size
+        if remote_pcp_size > 1 and remote_dcp_size not in (1, remote_pcp_size):
+            raise NotImplementedError(
+                "Remote NixlConnector PCP+DCP does not span the full PCP group. "
+                f"Remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
+            )
+        if (local_pcp_size > 1 and local_dcp_size == 1 and remote_dcp_size > 1) or (
+            remote_pcp_size > 1 and remote_dcp_size == 1 and local_dcp_size > 1
+        ):
+            raise NotImplementedError(
+                "Replicated PCP cannot be paired with a DCP-sharded NIXL peer. "
+                f"Local PCP/DCP={local_pcp_size}/{local_dcp_size}; "
+                f"remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
+            )
+
+    def _validate_csa_linear_tp_layout(self, remote_tp_size: int) -> None:
+        """Reject P/D pairs whose main-KV pages have different head layouts.
+
+        A rank at TP < total KV heads holds several heads per page, while a
+        rank at TP >= total KV heads holds exactly one (replicated beyond
+        that). CSA-linear pages are shared tensors that transfer as whole
+        block units, so endpoints on opposite sides of that boundary lay
+        them out differently and cannot exchange them.
+        """
+        assert self.transfer_topo is not None
+        total_kv_heads = self.transfer_topo.total_num_kv_heads
+        if (self.world_size < total_kv_heads) != (remote_tp_size < total_kv_heads):
+            raise ValueError(
+                "CSA-linear NIXL requires both endpoints on the same side of "
+                f"the KV-head sharding boundary ({total_kv_heads} KV heads): "
+                f"got local TP {self.world_size}, remote TP {remote_tp_size}."
+            )
+
+    def _validate_remote_xfer_agent(
+        self, nixl_agent_meta: NixlAgentMetadata, remote_tp_size: int
+    ) -> None:
+        if (
+            self._packed_member_layouts
+            and self._packed_member_layouts != nixl_agent_meta.packed_member_layouts
+        ):
+            # Whole rows transfer as one unit, so both sides must pack them alike.
+            raise RuntimeError(
+                "Packed KV block rows differ between P and D. Use the same "
+                "VLLM_KV_CACHE_LAYOUT and block size on both sides."
+            )
 
     def _validate_remote_agent_handshake(
         self,
