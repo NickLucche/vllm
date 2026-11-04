@@ -546,6 +546,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     notif_id=notif_id,
                 )
                 return True
+            prep_start = time.perf_counter()
             handle = self.nixl_wrapper.make_prepped_xfer(
                 "READ",
                 local_xfer_side_handle,
@@ -554,6 +555,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_block_descs_ids,
                 notif_msg=notif_id,
             )
+            self.xfer_stats.record_prep(time.perf_counter() - prep_start)
 
             # Begin async xfer.
             self.nixl_wrapper.transfer(handle)

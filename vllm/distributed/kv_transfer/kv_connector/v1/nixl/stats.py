@@ -35,6 +35,7 @@ class NixlKVConnectorStats(KVConnectorStats):
         self.data: dict[str, list[float | int]] = {
             "transfer_duration": [],
             "post_duration": [],
+            "prep_duration": [],
             "bytes_transferred": [],
             "num_descriptors": [],
             "num_failed_transfers": [],
@@ -52,6 +53,10 @@ class NixlKVConnectorStats(KVConnectorStats):
         self.data["post_duration"].append(res.postDuration / 1e6)
         self.data["bytes_transferred"].append(res.totalBytes)
         self.data["num_descriptors"].append(res.descCount)
+
+    def record_prep(self, duration_s: float):
+        """Record the CPU time spent preparing a transfer (make_prepped_xfer)."""
+        self.data["prep_duration"].append(duration_s)
 
     def record_failed_transfer(self):
         """Record a failed NIXL transfer operation."""
@@ -122,6 +127,7 @@ class NixlKVConnectorStats(KVConnectorStats):
                 "P90 xfer time (ms)": 0,
                 "Avg post time (ms)": 0,
                 "P90 post time (ms)": 0,
+                "Avg prep time (ms)": 0,
                 "Avg MB per transfer": 0,
                 "Throughput (MB/s)": 0,
                 "Avg number of descriptors": 0,
@@ -130,6 +136,9 @@ class NixlKVConnectorStats(KVConnectorStats):
 
         xfer_time = np.asarray(self.data["transfer_duration"])
         post_time = np.asarray(self.data["post_duration"])
+        # Recorded when a transfer is created, so not one-to-one with the
+        # transfers completed in this interval.
+        prep_time = np.asarray(self.data.get("prep_duration") or [0.0])
         # Convert to MB for CLI logging.
         mb = np.asarray(self.data["bytes_transferred"]) / 2**20
         descs = np.asarray(self.data["num_descriptors"], dtype=np.uint32)
@@ -148,6 +157,7 @@ class NixlKVConnectorStats(KVConnectorStats):
             "P90 xfer time (ms)": round(np.percentile(xfer_time, 90).item() * 1e3, 3),
             "Avg post time (ms)": round(post_time.mean().item() * 1e3, 3),
             "P90 post time (ms)": round(np.percentile(post_time, 90).item() * 1e3, 3),
+            "Avg prep time (ms)": round(prep_time.mean().item() * 1e3, 3),
             "Avg MB per transfer": round(avg_mb.item(), 3),
             "Throughput (MB/s)": round(throughput_mb_s.item(), 3),
             "Avg number of descriptors": round(descs.mean().item(), 1),
@@ -202,6 +212,16 @@ class NixlPromMetrics(KVConnectorPromMetrics):
         )
         self.nixl_histogram_post_time = create_metric_per_engine(
             nixl_histogram_post_time, self.per_engine_labelvalues
+        )
+        nixl_histogram_prep_time = self._histogram_cls(
+            name="vllm:nixl_prep_time_seconds",
+            documentation="Histogram of CPU time spent preparing NIXL KV Cache"
+            " transfers (make_prepped_xfer, including descriptor merging).",
+            buckets=[1e-5, 5e-5, 1e-4, 2.5e-4, 5e-4] + buckets[:7],
+            labelnames=labelnames,
+        )
+        self.nixl_histogram_prep_time = create_metric_per_engine(
+            nixl_histogram_prep_time, self.per_engine_labelvalues
         )
         # uniform 2kb to 16gb range
         buckets = [2 ** (10 + i) for i in range(1, 25, 2)]
@@ -289,17 +309,19 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             [
                 self.nixl_histogram_xfer_time,
                 self.nixl_histogram_post_time,
+                self.nixl_histogram_prep_time,
                 self.nixl_histogram_bytes_transferred,
                 self.nixl_histogram_num_descriptors,
             ],
             [
                 "transfer_duration",
                 "post_duration",
+                "prep_duration",
                 "bytes_transferred",
                 "num_descriptors",
             ],
         ):
-            for list_item in transfer_stats_data[list_item_key]:
+            for list_item in transfer_stats_data.get(list_item_key, []):
                 prom_obj[engine_idx].observe(list_item)
         for counter_obj, counter_item_keys in zip(
             [
