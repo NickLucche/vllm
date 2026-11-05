@@ -272,6 +272,7 @@ class HiSparseConnectorWorker:
         self.shared_host_region = shared_host_region
         self.is_host_writer = is_host_writer
         self.dma_stream = torch.Stream(device=device) if self.is_host_writer else None
+        self.promote_stream = torch.Stream(device=device)
         self._slot_mapping_staging = None
         if self.is_host_writer:
             max_mirror_rows = (
@@ -425,7 +426,14 @@ class HiSparseConnectorWorker:
         transfers = (
             metadata.command.page_transfers if metadata.command is not None else []
         )
-        self._restore_pages([transfer for transfer in transfers if transfer.restore])
+        compute_stream = torch.accelerator.current_stream()
+        self._restore_pages(
+            [t for t in transfers if t.restore and not t.promote], compute_stream
+        )
+        if promotions := [t for t in transfers if t.promote]:
+            # The promoted blocks may have been read by earlier forwards.
+            self.promote_stream.wait_stream(compute_stream)
+            self._restore_pages(promotions, self.promote_stream)
         self._post_forward_transfers = [
             transfer for transfer in transfers if not transfer.restore
         ]
@@ -574,10 +582,13 @@ class HiSparseConnectorWorker:
         return stats
 
     def _release_completed_dma_descriptors(self) -> None:
-        pending = self._pending_dma_descriptors
-        while pending and pending[0][0].query():
-            _, descriptors = pending.popleft()
-            self._dma_free_descriptors.append(descriptors)
+        pending: deque[tuple[torch.Event, _DMADescriptors]] = deque()
+        for event, descriptors in self._pending_dma_descriptors:
+            if event.query():
+                self._dma_free_descriptors.append(descriptors)
+            else:
+                pending.append((event, descriptors))
+        self._pending_dma_descriptors = pending
 
     def _acquire_dma_descriptors(self, size: int) -> _DMADescriptors:
         for index, descriptors in enumerate(self._dma_free_descriptors):
@@ -739,8 +750,10 @@ class HiSparseConnectorWorker:
         self._pending_transfer_events.append((completion_event, transfer_ids))
         self._enqueued_transfer_ids.extend(transfer_ids)
 
-    def _restore_pages(self, transfers: list[SparseKVPageTransfer]) -> None:
-        """Copy host pages into resident pages on every rank before its forward.
+    def _restore_pages(
+        self, transfers: list[SparseKVPageTransfer], stream: torch.Stream
+    ) -> None:
+        """Copy host pages into resident pages on every rank, on ``stream``.
 
         Covers imported tails and promoted imports. One batched H2D call per
         step, instead of one copy per page and layer, keeps a long promoted
@@ -783,12 +796,12 @@ class HiSparseConnectorWorker:
                 + resident_blocks * destination.stride(0) * destination.element_size()
             )
             descriptors.sizes_np[descriptor_slice] = self.kernel_block_size * row_bytes
-        stream = torch.accelerator.current_stream()
-        self.backend.swap_blocks_batch(
-            descriptors.src[:descriptor_count],
-            descriptors.dst[:descriptor_count],
-            descriptors.sizes[:descriptor_count],
-        )
+        with stream:
+            self.backend.swap_blocks_batch(
+                descriptors.src[:descriptor_count],
+                descriptors.dst[:descriptor_count],
+                descriptors.sizes[:descriptor_count],
+            )
         completion_event = torch.Event()
         completion_event.record(stream)
         self._pending_dma_descriptors.append((completion_event, descriptors))
@@ -959,13 +972,16 @@ class HiSparseConnectorWorker:
     def take_transfer_updates(self) -> tuple[list[int], list[int]]:
         enqueued = self._enqueued_transfer_ids
         self._enqueued_transfer_ids = []
+        # Promotions finish on their own stream, so later transfers can
+        # complete before an earlier one.
         completed: list[int] = []
-        while self._pending_transfer_events:
-            event, transfer_ids = self._pending_transfer_events[0]
-            if not event.query():
-                break
-            self._pending_transfer_events.popleft()
-            completed.extend(transfer_ids)
+        pending: deque[tuple[torch.Event, tuple[int, ...]]] = deque()
+        for event, transfer_ids in self._pending_transfer_events:
+            if event.query():
+                completed.extend(transfer_ids)
+            else:
+                pending.append((event, transfer_ids))
+        self._pending_transfer_events = pending
         return enqueued, completed
 
     def shutdown(self) -> None:
@@ -975,6 +991,7 @@ class HiSparseConnectorWorker:
             self._slot_mapping_staging.stream.synchronize()
         if self.dma_stream is not None:
             self.dma_stream.synchronize()
+        self.promote_stream.synchronize()
         release_pinned_state(
             self.pinned_host_pools,
             self.shared_host_region,

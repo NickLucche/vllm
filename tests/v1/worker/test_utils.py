@@ -701,7 +701,7 @@ def test_hisparse_tail_restore_preserves_imported_rows(
         monkeypatch.setattr(gpu_sync_debug, "_sync_check_enabled", False)
         gpu_sync_debug.enable_gpu_sync_check()
         restore_pages = gpu_sync_debug.with_gpu_sync_check(restore_pages)
-    restore_pages([transfer])
+    restore_pages([transfer], stream)
 
     # Appending into unused capacity must preserve every imported prompt row.
     for cache, host, block in zip(
@@ -1330,6 +1330,7 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker._initialized = True
     worker._slot_mapping_staging = None
     worker.dma_stream = None
+    worker.promote_stream = MagicMock()
     worker.cache_handles = []
     worker.pinned_host_pools = []
     worker.shared_host_region = object()

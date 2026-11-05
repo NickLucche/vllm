@@ -16,6 +16,9 @@ class SparseKVPageTransfer:
     host_block_id: int
     resident_block_ids: tuple[int, ...]
     restore: bool = False
+    # A restore into pages no forward reads until it completes, so it may run
+    # off the compute stream.
+    promote: bool = False
 
 
 @dataclass(frozen=True)

@@ -780,24 +780,29 @@ def test_hisparse_import_promotes_host_pages_when_pool_has_room(has_room):
         source[-1].block_id,
         *(source[page].block_id for page in promoted),
     ]
+    assert [t.promote for t in transfers] == [False] + [True] * len(promoted)
+    # Decode keeps reading the host copies until the promotions complete, so
+    # their copies need not finish before the next forward.
+    row = _resident_block_ids(manager, request.request_id)
+    assert [block_id != 0 for block_id in row] == [False] * 4 + [True]
+    coordinator.take_residency_updates([request.request_id])
+
+    counts = {t.transfer_id: 1 for t in transfers}
+    coordinator.update_spills(counts, counts)
     row = _resident_block_ids(manager, request.request_id)
     assert [block_id != 0 for block_id in row] == [has_room] * 4 + [True]
     assert [t.resident_block_ids for t in transfers[1:]] == [
         (row[page],) for page in promoted
     ]
-    # The worker reads promoted pages only once the residency update ships with
-    # the restores that fill them.
-    updates = coordinator.take_residency_updates([request.request_id])
-    assert updates[request.request_id].block_ids == (row,)
-
-    gpu_blocks = [pool.blocks[block_id] for block_id in row]
-    counts = {t.transfer_id: 1 for t in transfers}
-    coordinator.update_spills(counts, counts)
+    if has_room:
+        update = coordinator.take_residency_updates([request.request_id])
+        assert update[request.request_id].pages == list(promoted)
     # Promoted pages are clean copies of host pages, so the residency policy
     # treats them like any other clean page: readable, but reclaimable.
     state = coordinator.request_states[request.request_id]
     assert state.pinned_clean | state.unpinned_pages == set(promoted)
 
+    gpu_blocks = [pool.blocks[block_id] for block_id in row]
     manager.free(request)
     assert all(block.ref_cnt == 0 for block in gpu_blocks if not block.is_null)
     assert not coordinator.has_pending_work()
@@ -815,10 +820,13 @@ def test_hisparse_aborted_promotion_keeps_pages_until_restored():
     coordinator.finish_host_import(request.request_id, failed=False)
     transfers = coordinator.build_offload_command().page_transfers
     assert len(transfers) == 3
-    row = _resident_block_ids(manager, request.request_id)
-    gpu_blocks = [coordinator.gpu_pool.blocks[block_id] for block_id in row]
+    gpu_blocks = [
+        coordinator.gpu_pool.blocks[block_id]
+        for transfer in transfers
+        for block_id in transfer.resident_block_ids
+    ]
     manager.free(request)
-    assert all(block.ref_cnt == 1 for block in gpu_blocks)
+    assert all(block.ref_cnt > 0 for block in gpu_blocks)
     counts = {t.transfer_id: 1 for t in transfers}
     coordinator.update_spills(counts, counts)
     assert all(block.ref_cnt == 0 for block in gpu_blocks)
