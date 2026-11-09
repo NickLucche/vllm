@@ -41,7 +41,7 @@ from vllm.v1.kv_cache_interface import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
@@ -105,6 +105,16 @@ class NixlBaseConnectorScheduler:
             g.kv_cache_spec.prefix_replay_tokens > 0
             for g in kv_cache_config.kv_cache_groups
         )
+
+        # Stop P/D loads at a Mamba "align" checkpoint boundary so the decoder
+        # receives a block-aligned state it can prefix-cache, and recomputes
+        # the prompt tail itself. Set from `bind_kv_cache_manager`.
+        self._ssm_checkpoint_alignment = 0
+        self._ssm_checkpoint_aligned_xfer = bool(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "ssm_checkpoint_aligned_xfer", False
+            )
+        ) and bool(vllm_config.cache_config.enable_prefix_caching)
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
@@ -399,31 +409,66 @@ class NixlBaseConnectorScheduler:
             self.vllm_config.num_prefill_lookahead_tokens - 1,
         )
 
+    def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
+        if self._ssm_checkpoint_aligned_xfer:
+            self._ssm_checkpoint_alignment = (
+                kv_cache_manager.get_state_checkpoint_alignment()
+            )
+            if self._ssm_checkpoint_alignment:
+                logger.info(
+                    "P/D loads stop at Mamba checkpoint boundaries (every %d "
+                    "tokens); the decoder recomputes the prompt tail.",
+                    self._ssm_checkpoint_alignment,
+                )
+            else:
+                logger.warning(
+                    "ssm_checkpoint_aligned_xfer is ignored: no Mamba align-mode group."
+                )
+
+    def _num_prefill_backoff_tokens(self, num_prompt_tokens: int) -> int:
+        """Trailing prompt tokens the prefiller skips and the decoder
+        recomputes. At least `_prefill_backoff()`; with
+        `ssm_checkpoint_aligned_xfer`, extended down to the last Mamba
+        checkpoint boundary, so the transferred running state is a
+        block-aligned state the decoder caches for later local turns. Must
+        agree between P and D, which both derive it from the full prompt."""
+        backoff = self._prefill_backoff()
+        if backoff and num_prompt_tokens <= backoff:
+            return 0
+        align = self._ssm_checkpoint_alignment
+        if align:
+            # The checkpoint's block hash also covers the lookahead tokens.
+            limit = num_prompt_tokens - max(
+                backoff, self.vllm_config.num_hash_lookahead_tokens
+            )
+            checkpoint = limit // align * align
+            if checkpoint > 0:
+                return num_prompt_tokens - checkpoint
+        return backoff
+
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. The number of prompt tokens to load from the prefiller.
-        Stops short of the trailing `_prefill_backoff()` tokens that the decoder
-        will recompute locally."""
-        backoff = self._prefill_backoff()
-        if backoff and num_prompt_tokens > backoff:
-            return num_prompt_tokens - backoff
-        return num_prompt_tokens
+        Stops short of the trailing `_num_prefill_backoff_tokens()` tokens that
+        the decoder will recompute locally."""
+        return num_prompt_tokens - self._num_prefill_backoff_tokens(num_prompt_tokens)
 
     def _truncate_request_for_prefill(self, request: "Request") -> None:
-        """P-side only: drop the trailing `_prefill_backoff()` prompt tokens
-        so the prefiller stops short of what the decoder recomputes locally.
-        For Mamba that is the single token needed to yield h(N-1); for
-        multi-module MTP it is the drafter's whole lookahead window.
+        """P-side only: drop the trailing `_num_prefill_backoff_tokens()`
+        prompt tokens so the prefiller stops short of what the decoder
+        recomputes locally. For Mamba that is the single token needed to yield
+        h(N-1) (or down to a checkpoint boundary, see
+        `ssm_checkpoint_aligned_xfer`); for multi-module MTP it is the drafter's
+        whole lookahead window.
 
         Guarded by `_p_side_truncated` to avoid repeated truncation if the
         request is preempted and rescheduled."""
-        backoff = self._prefill_backoff()
+        backoff = self._num_prefill_backoff_tokens(request.num_prompt_tokens)
         params = request.kv_transfer_params
         if (
             backoff
             and params is not None
             # Guard against repeated truncation after preemption/reschedule.
             and not params.get("_p_side_truncated")
-            and request.num_prompt_tokens > backoff
             # A request that skips reading external KV (prompt logprobs)
             # loads nothing on the decoder, which recomputes past its local hit.
             and not request.skip_reading_external_kv

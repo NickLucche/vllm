@@ -893,6 +893,14 @@ class KVCacheManager:
         retained_blocks = [block for pair in pending_copies for block in pair]
         return copies, retained_blocks
 
+    def get_state_checkpoint_alignment(self) -> int:
+        """Token granularity at which Mamba "align" states are prefix-cached,
+        or 0 if no group caches recurrent states at block boundaries."""
+        for mgr in self.coordinator.single_type_managers:
+            if isinstance(mgr, MambaManager) and mgr.mamba_cache_mode == "align":
+                return mgr.cache_hit_alignment_tokens
+        return 0
+
     def take_boundary_state_offloads(
         self,
     ) -> dict[str, list[tuple[int, int, int]]]:
