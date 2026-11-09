@@ -554,6 +554,27 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
+    def get_external_state_checkpoint(
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+        num_external_tokens: int,
+    ) -> int | None:
+        """Token boundary inside the external load at which this connector
+        also loads a recurrent-state (Mamba "align") checkpoint.
+
+        A load ending mid-block restores only the running state, so the
+        consumer has no block-aligned state to prefix-cache and a later local
+        turn recomputes the whole prompt. A connector that can also deliver
+        the checkpoint at `KVCacheManager.get_state_checkpoint_tokens` returns
+        that boundary here; the scheduler then reserves a slot for it and
+        includes it in the blocks passed to `update_state_after_alloc`.
+
+        Called only when `num_external_tokens > 0`. Default: None (no
+        checkpoint loaded).
+        """
+        return None
+
     def get_external_cache_hit_sources(
         self,
         request: "Request",

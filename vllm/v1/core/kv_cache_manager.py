@@ -24,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
+    get_mamba_prefill_checkpoint_position,
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
@@ -412,6 +413,7 @@ class KVCacheManager:
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
         skip_zeroing_group_ids: tuple[int, ...] = (),
+        external_state_checkpoint: int | None = None,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -446,6 +448,10 @@ class KVCacheManager:
                 this step, controls whether watermark is applied.
             skip_zeroing_group_ids: Groups whose external-token blocks will be
                 written by an async load and must not be zeroed concurrently.
+            external_state_checkpoint: Token boundary inside the external load
+                at which the connector also loads a recurrent (Mamba "align")
+                state checkpoint, so that state lands in a slot of its own and
+                gets prefix-cached. See `get_state_checkpoint_tokens`.
 
         Blocks layout:
         ```
@@ -511,6 +517,11 @@ class KVCacheManager:
                 "computed tokens to adopt"
             )
 
+        if external_state_checkpoint is not None and num_external_computed_tokens:
+            self._set_external_state_checkpoint(
+                request.request_id, external_state_checkpoint
+            )
+
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
             if self.retained_hit_group_ids:
@@ -566,6 +577,8 @@ class KVCacheManager:
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
             if required_blocks > self.block_pool.get_num_free_blocks():
+                if external_state_checkpoint is not None:
+                    self._set_external_state_checkpoint(request.request_id, None)
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
@@ -606,6 +619,8 @@ class KVCacheManager:
         required_blocks = num_blocks_to_allocate + watermark_blocks
         if required_blocks > available_blocks:
             # Cannot allocate new blocks
+            if external_state_checkpoint is not None:
+                self._set_external_state_checkpoint(request.request_id, None)
             return None
 
         if (
@@ -893,8 +908,26 @@ class KVCacheManager:
         retained_blocks = [block for pair in pending_copies for block in pair]
         return copies, retained_blocks
 
-    def reserve_external_boundary_blocks(
-        self, request_id: str, boundary_tokens: int
+    def get_state_checkpoint_tokens(self, num_tokens: int) -> int:
+        """Token boundary of the Mamba "align" checkpoint a prefill of
+        `num_tokens` retains, or 0 if there is none.
+
+        Single source of truth for connectors exchanging that checkpoint: the
+        producer's hand-off (`take_boundary_state_offloads`) and the consumer's
+        `external_state_checkpoint` slot must agree on it.
+        """
+        for mgr in self.coordinator.single_type_managers:
+            if isinstance(mgr, MambaManager) and mgr.mamba_cache_mode == "align":
+                return get_mamba_prefill_checkpoint_position(
+                    num_tokens,
+                    mgr.cache_hit_alignment_tokens,
+                    mgr.drop_eagle_checkpoint_block,
+                    num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+                )
+        return 0
+
+    def _set_external_state_checkpoint(
+        self, request_id: str, boundary_tokens: int | None
     ) -> None:
         """See `MambaManager.reserve_external_boundary_block`."""
         for mgr in self.coordinator.single_type_managers:

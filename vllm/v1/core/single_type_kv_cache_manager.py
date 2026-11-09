@@ -1932,11 +1932,16 @@ class MambaManager(SingleTypeKVCacheManager):
                 return returned_blocks
 
     def reserve_external_boundary_block(
-        self, request_id: str, boundary_tokens: int
+        self, request_id: str, boundary_tokens: int | None
     ) -> None:
         """Keep a block at the received boundary within an external load so its
-        state gets cached with the prefix. Call before the first allocation."""
-        if self.mamba_cache_mode == "align" and not self.req_to_blocks.get(request_id):
+        state gets cached with the prefix. Set before the first allocation;
+        None drops the reservation (the allocation did not happen)."""
+        if boundary_tokens is None:
+            self._external_boundary_reqs.pop(request_id, None)
+        elif self.mamba_cache_mode == "align" and not self.req_to_blocks.get(
+            request_id
+        ):
             self._external_boundary_reqs[request_id] = boundary_tokens
 
     def allocate_external_computed_blocks(

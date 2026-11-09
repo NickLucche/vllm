@@ -209,6 +209,17 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         if self.connector_scheduler is not None:
             self.connector_scheduler.bind_kv_cache_manager(kv_cache_manager)
 
+    def get_external_state_checkpoint(
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+        num_external_tokens: int,
+    ) -> int | None:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.get_external_state_checkpoint(
+            request, num_computed_tokens, num_external_tokens
+        )
+
     def on_new_request(self, request: "Request") -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.on_new_request(request)

@@ -64,7 +64,6 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             actual = self._get_remote_prefill_token_count(len(token_ids))
             count = actual - num_computed_tokens
             if count > 0:
-                self._maybe_reserve_boundary_state(request, actual, num_computed_tokens)
                 return count, True
 
         if (

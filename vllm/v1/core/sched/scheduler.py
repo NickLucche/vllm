@@ -1141,6 +1141,7 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 num_external_computed_tokens = 0
+                external_state_checkpoint = None
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
                 did_prefix_cache_lookup = False
@@ -1251,6 +1252,14 @@ class Scheduler(SchedulerInterface):
                             request.num_tokens - num_new_local_computed_tokens
                         )
                         connector_prefix_cache_hits = num_external_computed_tokens
+                        if num_external_computed_tokens > 0:
+                            external_state_checkpoint = (
+                                self.connector.get_external_state_checkpoint(
+                                    request,
+                                    num_new_local_computed_tokens,
+                                    num_external_computed_tokens,
+                                )
+                            )
 
                     # Total computed tokens (local + external).
                     num_computed_tokens = (
@@ -1501,6 +1510,7 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
                     num_external_computed_tokens=num_external_computed_tokens,
+                    external_state_checkpoint=external_state_checkpoint,
                     delay_cache_blocks=load_kv_async,
                     skip_zeroing_group_ids=(
                         self.connector.get_loaded_kv_cache_group_ids(request)

@@ -487,6 +487,19 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 to_return = (toks, load_async)
         return to_return
 
+    def get_external_state_checkpoint(
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+        num_external_tokens: int,
+    ) -> int | None:
+        chosen_connector = self._requests_to_connector.get(request.request_id)
+        if chosen_connector is None:
+            return None
+        return self._connectors[chosen_connector].get_external_state_checkpoint(
+            request, num_computed_tokens, num_external_tokens
+        )
+
     def get_external_cache_hit_sources(
         self,
         request: "Request",

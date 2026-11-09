@@ -208,7 +208,6 @@ class NixlBaseConnectorScheduler:
             and parallel_config.decode_context_parallel_size == 1
         )
         self._kv_cache_manager: KVCacheManager | None = None
-        self._eagle_block_drop = False
         # P side: req -> (boundary tokens, pinned state block per align group).
         self._boundary_pins: dict[ReqId, tuple[int, dict[int, KVCacheBlock]]] = {}
         if self._ssm_boundary_transfer:
@@ -241,24 +240,15 @@ class NixlBaseConnectorScheduler:
 
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
         self._kv_cache_manager = kv_cache_manager
-        self._eagle_block_drop = bool(kv_cache_manager.coordinator.drop_eagle_group_ids)
-
-    def _ssm_boundary_tokens(self, num_tokens: int) -> int:
-        """Highest retained prefill checkpoint. With EAGLE/MTP block dropping,
-        sparse retention keeps the replay boundary one block earlier."""
-        boundary = num_tokens // self.block_size * self.block_size
-        if self._eagle_block_drop:
-            boundary -= self.block_size
-        return boundary
 
     def on_new_request(self, request: "Request") -> None:
         """Track a request that may need heartbeats."""
         params = request.kv_transfer_params
         if params is not None and params.get("do_remote_decode"):
             self._truncate_request_for_prefill(request)
-            if self._ssm_boundary_transfer:
+            if self._ssm_boundary_transfer and self._kv_cache_manager is not None:
                 n = request.num_prompt_tokens
-                boundary = self._ssm_boundary_tokens(n)
+                boundary = self._kv_cache_manager.get_state_checkpoint_tokens(n)
                 if 0 < boundary < n:
                     self._boundary_pins[request.request_id] = (boundary, {})
 
@@ -663,21 +653,26 @@ class NixlBaseConnectorScheduler:
         self._release_boundary_pins(request.request_id)
         return block_ids, None
 
-    def _maybe_reserve_boundary_state(
-        self, request: "Request", num_loaded_tokens: int, num_computed_tokens: int
-    ) -> None:
-        """D side: reserve a block for the boundary state the prefiller sends,
+    def get_external_state_checkpoint(
+        self, request: "Request", num_computed_tokens: int, num_external_tokens: int
+    ) -> int | None:
+        """D side: the boundary state the prefiller sends along with the load,
         unless the local prefix hit already covers it."""
         params = request.kv_transfer_params
-        if not self._ssm_boundary_transfer or self._kv_cache_manager is None:
-            return
-        boundary = params.get("remote_ssm_boundary_tokens") if params else None
-        expected = self._ssm_boundary_tokens(num_loaded_tokens)
-        if boundary != expected or num_computed_tokens >= boundary:
-            return
-        self._kv_cache_manager.reserve_external_boundary_blocks(
-            request.request_id, boundary
+        if (
+            not self._ssm_boundary_transfer
+            or self._kv_cache_manager is None
+            or not params
+            or not params.get("do_remote_prefill")
+        ):
+            return None
+        boundary = params.get("remote_ssm_boundary_tokens")
+        expected = self._kv_cache_manager.get_state_checkpoint_tokens(
+            num_computed_tokens + num_external_tokens
         )
+        if boundary != expected or num_computed_tokens >= boundary:
+            return None
+        return boundary
 
     def has_pending_push_work(self) -> bool:
         return False
