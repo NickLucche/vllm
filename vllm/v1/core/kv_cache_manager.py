@@ -913,8 +913,8 @@ class KVCacheManager:
         `num_tokens` retains, or 0 if there is none.
 
         Single source of truth for connectors exchanging that checkpoint: the
-        producer's hand-off (`take_boundary_state_offloads`) and the consumer's
-        `external_state_checkpoint` slot must agree on it.
+        producer's retained checkpoint (`retain_state_checkpoint`) and the
+        consumer's `external_state_checkpoint` slot must agree on it.
         """
         for mgr in self.coordinator.single_type_managers:
             if isinstance(mgr, MambaManager) and mgr.mamba_cache_mode == "align":
@@ -925,6 +925,32 @@ class KVCacheManager:
                     num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
                 )
         return 0
+
+    def retain_state_checkpoint(self, request_id: str, num_tokens: int) -> int:
+        """Producer side: keep the state checkpoint of a `num_tokens` prefill
+        in the request's block table until the request is freed, so a
+        connector can still send it after the request finishes (its blocks
+        held by the connector's delayed free). Returns the checkpoint's token
+        boundary, or 0 if there is none. Release with
+        `pop_state_checkpoint`."""
+        boundary_tokens = self.get_state_checkpoint_tokens(num_tokens)
+        if not 0 < boundary_tokens < num_tokens:
+            return 0
+        for mgr in self.coordinator.single_type_managers:
+            if isinstance(mgr, MambaManager):
+                mgr.retain_state_checkpoint(request_id, boundary_tokens)
+        return boundary_tokens
+
+    def pop_state_checkpoint(self, request_id: str) -> dict[int, int]:
+        """Stop retaining the request's state checkpoint. Returns the block id
+        holding it per KV cache group that still has one."""
+        block_ids: dict[int, int] = {}
+        for mgr in self.coordinator.single_type_managers:
+            if isinstance(mgr, MambaManager):
+                if block := mgr.get_retained_checkpoint_block(request_id):
+                    block_ids[mgr.kv_cache_group_id] = block.block_id
+                mgr.retain_state_checkpoint(request_id, None)
+        return block_ids
 
     def _set_external_state_checkpoint(
         self, request_id: str, boundary_tokens: int | None

@@ -245,7 +245,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         ):
             # Also include the case of a P/D Prefill request with immediate
             # block free (eg abort). Stop tracking this request.
-            self._release_boundary_pins(request.request_id)
+            self._release_boundary_state(request.request_id)
             self._reqs_not_processed.add(request.request_id)
             # Clear _reqs_need_save if a request is aborted as partial prefill.
             self._reqs_need_save.pop(request.request_id, None)
@@ -288,7 +288,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
 
             remote_num_tokens = request.num_computed_tokens
         else:
-            self._release_boundary_pins(request.request_id)
+            self._release_boundary_state(request.request_id)
 
         params_out: dict[str, Any] = dict(
             do_remote_prefill=is_p_node,

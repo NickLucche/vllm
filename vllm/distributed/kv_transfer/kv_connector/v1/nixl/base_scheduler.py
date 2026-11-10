@@ -43,7 +43,6 @@ from vllm.v1.kv_cache_interface import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
-    from vllm.v1.core.kv_cache_utils import KVCacheBlock
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.outputs import KVConnectorOutput
     from vllm.v1.request import Request
@@ -208,8 +207,9 @@ class NixlBaseConnectorScheduler:
             and parallel_config.decode_context_parallel_size == 1
         )
         self._kv_cache_manager: KVCacheManager | None = None
-        # P side: req -> (boundary tokens, pinned state block per align group).
-        self._boundary_pins: dict[ReqId, tuple[int, dict[int, KVCacheBlock]]] = {}
+        # P side: req -> boundary tokens of the state checkpoint the KV cache
+        # manager retains in its block table for sending.
+        self._boundary_reqs: dict[ReqId, int] = {}
         if self._ssm_boundary_transfer:
             logger.info(
                 "SSM boundary-state transfer enabled for align groups %s",
@@ -246,11 +246,16 @@ class NixlBaseConnectorScheduler:
         params = request.kv_transfer_params
         if params is not None and params.get("do_remote_decode"):
             self._truncate_request_for_prefill(request)
-            if self._ssm_boundary_transfer and self._kv_cache_manager is not None:
-                n = request.num_prompt_tokens
-                boundary = self._kv_cache_manager.get_state_checkpoint_tokens(n)
-                if 0 < boundary < n:
-                    self._boundary_pins[request.request_id] = (boundary, {})
+            if (
+                self._ssm_boundary_transfer
+                and self._kv_cache_manager is not None
+                and (
+                    boundary := self._kv_cache_manager.retain_state_checkpoint(
+                        request.request_id, request.num_prompt_tokens
+                    )
+                )
+            ):
+                self._boundary_reqs[request.request_id] = boundary
 
         # NOTE (NickLucche) This excludes request meant for P, ie heartbeats are
         # effectively disabled for Bidirectional KV transfer.
@@ -544,9 +549,6 @@ class NixlBaseConnectorScheduler:
     ) -> KVConnectorMetadata:
         meta = NixlConnectorMetadata()
 
-        if self._ssm_boundary_transfer:
-            self._pin_boundary_states(scheduler_output)
-
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (
             req,
@@ -593,64 +595,49 @@ class NixlBaseConnectorScheduler:
         """Stop heartbeating for requests whose KV transfer completed."""
         for req_id in connector_output.finished_recving or ():
             self._stop_heartbeat(req_id)
-        if self._ssm_boundary_transfer:
-            for req_id in connector_output.finished_sending or ():
-                self._release_boundary_pins(req_id)
 
     ############################################################
     # SSM boundary-state transfer (Mamba "align" mode)
     ############################################################
-    def _pin_boundary_states(self, scheduler_output: SchedulerOutput) -> None:
-        """P side: pin each producer request's boundary state when offered."""
-        block_state = scheduler_output.kv_connector_block_state
-        if block_state is None or self._kv_cache_manager is None:
-            return
-        pool = self._kv_cache_manager.block_pool
-        transfer_index = {
-            group_id: i
-            for i, group_id in enumerate(self.kv_cache_config.transfer_group_ids)
-        }
-        for req_id, entries in block_state.boundary_state_offloads.items():
-            if req_id not in self._boundary_pins:
-                continue
-            boundary, pins = self._boundary_pins[req_id]
-            for group_id, block_id, boundary_tokens in entries:
-                group = transfer_index.get(group_id)
-                if (
-                    boundary_tokens != boundary
-                    or group not in self._align_ssm_groups
-                    or group in pins
-                    or block_id == NULL_BLOCK_ID
-                ):
-                    continue
-                block = pool.blocks[block_id]
-                pool.touch([block])
-                pins[group] = block
-
-    def _release_boundary_pins(self, req_id: ReqId) -> None:
-        _, pins = self._boundary_pins.pop(req_id, (0, {}))
-        if pins and self._kv_cache_manager is not None:
-            self._kv_cache_manager.block_pool.free_blocks(list(pins.values()))
+    def _release_boundary_state(self, req_id: ReqId) -> dict[int, int]:
+        """P side: stop retaining the request's state checkpoint. Returns its
+        block id per KV cache group."""
+        if self._boundary_reqs.pop(req_id, None) is None:
+            return {}
+        assert self._kv_cache_manager is not None
+        return self._kv_cache_manager.pop_state_checkpoint(req_id)
 
     def _attach_boundary_states(
         self, request: "Request", block_ids: BlockIds
     ) -> tuple[BlockIds, int | None]:
-        """P side: prepend each align group's pinned boundary state to the
-        sent block ids. Returns the boundary token count, or None if not sent."""
-        boundary, pins = self._boundary_pins.get(request.request_id, (0, {}))
-        if all(g in pins and block_ids[g] for g in self._align_ssm_groups):
+        """P side: prepend each align group's retained state checkpoint to the
+        sent block ids. Returns the boundary token count, or None if not sent.
+        The checkpoint is in the request's own table, so the delayed free keeps
+        it alive until D has read it."""
+        boundary = self._boundary_reqs.get(request.request_id, 0)
+        transfer_index = {
+            group_id: i
+            for i, group_id in enumerate(self.kv_cache_config.transfer_group_ids)
+        }
+        states = {
+            transfer_index[group_id]: block_id
+            for group_id, block_id in self._release_boundary_state(
+                request.request_id
+            ).items()
+            if group_id in transfer_index
+        }
+        if all(g in states and block_ids[g] for g in self._align_ssm_groups):
             block_ids = tuple(
-                [pins[i].block_id, *blocks] if i in pins else blocks
+                [states[i], *blocks] if i in states else blocks
                 for i, blocks in enumerate(block_ids)
             )
             return block_ids, boundary
         logger.debug(
-            "Request %s: no SSM boundary state sent (boundary=%d, pinned=%s)",
+            "Request %s: no SSM boundary state sent (boundary=%d, groups=%s)",
             request.request_id,
             boundary,
-            sorted(pins),
+            sorted(states),
         )
-        self._release_boundary_pins(request.request_id)
         return block_ids, None
 
     def get_external_state_checkpoint(

@@ -1455,8 +1455,15 @@ class MambaManager(SingleTypeKVCacheManager):
         # Mamba checkpoints follow Eagle's global replay boundary.
         self.drop_eagle_checkpoint_block = False
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
-        # Every mode reads this map; only align mode reserves boundary states.
+        # Every mode reads these maps; only align mode fills them.
         self._external_boundary_reqs: dict[str, int] = {}
+        # Consumer: sub-block boundary slot -> (boundary tokens, block index),
+        # keyed at the boundary once the load lands.
+        self._external_partial_boundaries: dict[str, tuple[int, int]] = {}
+        # Producer: boundary tokens whose state block stays in the request's
+        # table until it is freed, for a connector to send after it finishes.
+        # Survives preemption; the connector releases it.
+        self._retained_checkpoints: dict[str, int] = {}
         if self.mamba_cache_mode == "align":
             # Mapping from request ID to the index of the block
             # allocated in the previous step
@@ -1625,7 +1632,7 @@ class MambaManager(SingleTypeKVCacheManager):
         freed: list[KVCacheBlock] = []
         # Mamba prefill leaves null gaps between states awaiting retirement.
         for i in range(last_block - 1, first_block - 1, -1):
-            if blocks[i].is_null:
+            if blocks[i].is_null or self._is_retained_checkpoint(request_id, blocks[i]):
                 continue
             freed.append(blocks[i])
             blocks[i] = self._null_block
@@ -1659,8 +1666,12 @@ class MambaManager(SingleTypeKVCacheManager):
                 < cdiv(processed_computed_tokens, self.block_size) - 1
             ):
                 blocks = self.req_to_blocks[request_id]
-                if blocks[last_state_block_idx] != self._null_block:
-                    self.block_pool.free_blocks([blocks[last_state_block_idx]])
+                last_state_block = blocks[last_state_block_idx]
+                if (
+                    last_state_block != self._null_block
+                    and not self._is_retained_checkpoint(request_id, last_state_block)
+                ):
+                    self.block_pool.free_blocks([last_state_block])
                     blocks[last_state_block_idx] = self._null_block
 
     def _needs_internal_checkpoint(
@@ -1944,6 +1955,32 @@ class MambaManager(SingleTypeKVCacheManager):
         ):
             self._external_boundary_reqs[request_id] = boundary_tokens
 
+    def retain_state_checkpoint(
+        self, request_id: str, boundary_tokens: int | None
+    ) -> None:
+        """Keep the state block keyed at `boundary_tokens` in the request's
+        table until the request is freed, instead of retiring it once the
+        prefill moves past it. None drops the retention."""
+        if boundary_tokens is None:
+            self._retained_checkpoints.pop(request_id, None)
+        elif self.mamba_cache_mode == "align":
+            self._retained_checkpoints[request_id] = boundary_tokens
+
+    def _is_retained_checkpoint(self, request_id: str, block: KVCacheBlock) -> bool:
+        boundary_tokens = self._retained_checkpoints.get(request_id)
+        return (
+            boundary_tokens is not None
+            and block.block_hash_num_tokens == boundary_tokens
+        )
+
+    def get_retained_checkpoint_block(self, request_id: str) -> KVCacheBlock | None:
+        """The retained state block, if the request's table still holds one
+        keyed at the retained boundary."""
+        for block in reversed(self.req_to_blocks.get(request_id, ())):
+            if not block.is_null and self._is_retained_checkpoint(request_id, block):
+                return block
+        return None
+
     def allocate_external_computed_blocks(
         self,
         request_id: str,
@@ -1963,10 +2000,17 @@ class MambaManager(SingleTypeKVCacheManager):
         # At num_computed itself, the running state is the boundary state.
         if boundary_tokens is None or boundary_tokens >= num_computed:
             return
-        boundary_idx = boundary_tokens // self.block_size - 1
+        is_sub_block = boundary_tokens % self.block_size != 0
+        # A sub-block boundary (prefix_match_unit < block size) has no block
+        # of its own: like the producer's internal checkpoint, it takes the
+        # slot just before the running state and is keyed at the boundary.
+        boundary_idx = (
+            cdiv(num_computed, self.block_size) - 2
+            if is_sub_block
+            else boundary_tokens // self.block_size - 1
+        )
         if (
-            boundary_tokens % self.block_size != 0
-            or not 0 <= boundary_idx < len(req_blocks) - 1
+            not 0 <= boundary_idx < len(req_blocks) - 1
             or not req_blocks[boundary_idx].is_null
         ):
             return
@@ -1974,6 +2018,12 @@ class MambaManager(SingleTypeKVCacheManager):
         req_blocks[boundary_idx] = boundary_block
         if self._record_new_block_ids and record_for_zeroing:
             self.new_block_ids.append(boundary_block.block_id)
+        if is_sub_block:
+            self._external_partial_boundaries[request_id] = (
+                boundary_tokens,
+                boundary_idx,
+            )
+            return
         # Let cache_blocks() hash the loaded state.
         self.num_cached_block[request_id] = min(
             self.num_cached_block.get(request_id, 0), boundary_idx
@@ -2014,6 +2064,7 @@ class MambaManager(SingleTypeKVCacheManager):
             self._checkpoints.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
             self._external_boundary_reqs.pop(request_id, None)
+            self._external_partial_boundaries.pop(request_id, None)
             # An offer is only guaranteed to hold committed bytes until the end
             # of the pass that made it. This request's blocks are going back to
             # the pool now, so drop its not-yet-offered hand-offs rather than
@@ -2055,6 +2106,9 @@ class MambaManager(SingleTypeKVCacheManager):
             )
             if partial_hash is not None:
                 self.cached_blocks_this_step.add(partial_hash)
+            partial_hash = self._cache_external_partial_boundary(request, num_tokens)
+            if partial_hash is not None:
+                self.cached_blocks_this_step.add(partial_hash)
         if num_cached_blocks_after > num_cached_blocks_before:
             blocks = self.req_to_blocks[request.request_id]
             for idx in range(num_cached_blocks_before, num_cached_blocks_after):
@@ -2082,6 +2136,28 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
+
+    def _cache_external_partial_boundary(
+        self, request: Request, num_tokens: int
+    ) -> BlockHashWithGroupId | None:
+        """Key a loaded sub-block boundary state at its boundary. The full-block
+        pass may have keyed its slot at the slot's end; that key is replaced."""
+        entry = self._external_partial_boundaries.get(request.request_id)
+        if entry is None or num_tokens <= entry[0]:
+            return None
+        del self._external_partial_boundaries[request.request_id]
+        boundary_tokens, block_idx = entry
+        block = self.req_to_blocks[request.request_id][block_idx]
+        if block.is_null:
+            return None
+        return self.block_pool.cache_partial_block(
+            request=request,
+            block=block,
+            num_tokens=boundary_tokens,
+            kv_cache_group_id=self.kv_cache_group_id,
+            block_size=self.block_size,
+            replace_existing_hashes=True,
+        )
 
     def _cache_partial_tail_block(
         self,
