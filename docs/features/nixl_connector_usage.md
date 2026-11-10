@@ -159,9 +159,9 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - In bidirectional mode, the decoder caches KV blocks for multi-turn conversations. This TTL controls how long those blocks are held before being released. Unlike the prefiller lease, this TTL is not renewed via heartbeats.
     - Example: `--kv-transfer-config '{"kv_connector_extra_config": {"decoder_kv_blocks_ttl": 600}}'`
 
-- `ssm_checkpoint_aligned_xfer` (via `kv_connector_extra_config`): Stop the transferred prefix at the last Mamba prefix-cache boundary, and let the decoder recompute the prompt tail (about one cache block at most). The decoder then holds a block-aligned Mamba state that it prefix-caches, so a later turn routed straight to it (conditional disaggregation) reuses the prefix instead of recomputing the whole prompt. (Optional)
+- `ssm_checkpoint_aligned_xfer` (via `kv_connector_extra_config`): Stop the prefiller at the Mamba prefix-cache boundary that a local prefill would cache, and let the decoder recompute the prompt tail (up to one cache block, or two with the EAGLE/MTP block drop). The decoder then holds a block-aligned Mamba state that it prefix-caches, so a later turn routed straight to it (conditional disaggregation) reuses the prefix instead of recomputing the whole prompt. (Optional)
     - Default: false
-    - Only for hybrid Mamba models with prefix caching on (Mamba `align` cache mode). Set it on both P and D instances.
+    - Only for hybrid Mamba models with prefix caching on (Mamba `align` cache mode). Only the prefiller's setting matters: the decoder loads the token count the prefiller reports (`remote_num_tokens`), so a mismatch costs at most a missed prefix-cache hit.
     - Example: `--kv-transfer-config '{"kv_connector_extra_config": {"ssm_checkpoint_aligned_xfer": true}}'`
 
 ## Bidirectional KV Transfer (Multi-turn)
