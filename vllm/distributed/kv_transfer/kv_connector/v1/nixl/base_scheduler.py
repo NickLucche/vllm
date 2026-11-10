@@ -106,17 +106,11 @@ class NixlBaseConnectorScheduler:
             for g in kv_cache_config.kv_cache_groups
         )
 
-        # With `ssm_checkpoint_aligned_xfer`, P stops its prefill at a Mamba
-        # "align" checkpoint boundary so the decoder receives a state it can
-        # prefix-cache, and recomputes the prompt tail itself. Only P's flag
-        # matters: D loads whatever P reports in `remote_num_tokens`.
-        self._ssm_checkpoint_aligned_xfer = bool(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "ssm_checkpoint_aligned_xfer", False
-            )
-        )
         # Set from `bind_kv_cache_manager` when a Mamba group prefix-caches
-        # states at block boundaries.
+        # states at block boundaries. P then stops its prefill at a Mamba
+        # "align" checkpoint so the decoder receives a state it can
+        # prefix-cache, and recomputes the prompt tail itself. D loads
+        # whatever P reports in `remote_num_tokens`.
         self._kv_cache_manager: KVCacheManager | None = None
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
@@ -420,17 +414,10 @@ class NixlBaseConnectorScheduler:
         )
         if has_align_group:
             self._kv_cache_manager = kv_cache_manager
-        if self._ssm_checkpoint_aligned_xfer:
-            if has_align_group:
-                logger.info(
-                    "P/D prefills stop at Mamba checkpoint boundaries; the "
-                    "decoder recomputes the prompt tail."
-                )
-            else:
-                logger.warning(
-                    "ssm_checkpoint_aligned_xfer is ignored: no prefix-cached "
-                    "Mamba align-mode group."
-                )
+            logger.info(
+                "P/D prefills stop at Mamba checkpoint boundaries; the "
+                "decoder recomputes the prompt tail."
+            )
 
     def _ssm_checkpoint_cut(self, num_prompt_tokens: int) -> int:
         """The Mamba checkpoint a local prefill of the full prompt would
@@ -447,24 +434,22 @@ class NixlBaseConnectorScheduler:
 
     def _num_prefill_backoff_tokens(self, num_prompt_tokens: int) -> int:
         """P-side only. Trailing prompt tokens the prefiller skips and the
-        decoder recomputes: `_prefill_backoff()`, or with
-        `ssm_checkpoint_aligned_xfer` everything past `_ssm_checkpoint_cut()`,
-        so the transferred running state is one the decoder caches for later
-        local turns."""
+        decoder recomputes: `_prefill_backoff()`, or for a prefix-cached Mamba
+        align model everything past `_ssm_checkpoint_cut()`, so the transferred
+        running state is one the decoder caches for later local turns."""
         backoff = self._prefill_backoff()
         if backoff and num_prompt_tokens <= backoff:
             return 0
-        if self._ssm_checkpoint_aligned_xfer:
-            checkpoint = self._ssm_checkpoint_cut(num_prompt_tokens)
-            if checkpoint > 0:
-                return num_prompt_tokens - checkpoint
+        checkpoint = self._ssm_checkpoint_cut(num_prompt_tokens)
+        if checkpoint > 0:
+            return num_prompt_tokens - checkpoint
         return backoff
 
     def _get_remote_prefill_token_count(self, request: "Request") -> int:
         """D-side only. The number of prompt tokens to load from the prefiller.
 
         Uses the count P reports in `remote_num_tokens`, so P's cut (e.g. a
-        Mamba checkpoint from `ssm_checkpoint_aligned_xfer`, or a different
+        Mamba checkpoint, or a different
         alignment on a heterogeneous P) never has to be re-derived on D. A
         mismatch then costs at most a missed prefix-cache hit. Falls back to
         stopping short of `_prefill_backoff()` when P reports nothing."""
@@ -512,7 +497,7 @@ class NixlBaseConnectorScheduler:
         prompt tokens so the prefiller stops short of what the decoder
         recomputes locally. For Mamba that is the single token needed to yield
         h(N-1) (or down to a checkpoint boundary, see
-        `ssm_checkpoint_aligned_xfer`); for multi-module MTP it is the drafter's
+        `_ssm_checkpoint_cut()`); for multi-module MTP it is the drafter's
         whole lookahead window.
 
         Guarded by `_p_side_truncated` to avoid repeated truncation if the
