@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 FlyDSL Project Contributors
+# ruff: noqa: E501
 
 """Compile-time storage layout and CTA schedule for the ML4 MonoKernel."""
 

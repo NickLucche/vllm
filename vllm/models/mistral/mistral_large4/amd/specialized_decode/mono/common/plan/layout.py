@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from ROCm/ATOM (https://github.com/ROCm/ATOM), MIT License,
 # Copyright (C) 2026, Advanced Micro Devices, Inc.
+# ruff: noqa: E501
 """A kernel's mailbox regions laid out in its scratch or peer buffer."""
 
 PAIR_BYTES = 8  # a (value, tag) pair

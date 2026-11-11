@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from ROCm/ATOM (https://github.com/ROCm/ATOM), MIT License,
 # Copyright (C) 2026, Advanced Micro Devices, Inc.
+# ruff: noqa: E501
 """Symmetric peer memory for in-kernel TP reductions."""
 
 from __future__ import annotations

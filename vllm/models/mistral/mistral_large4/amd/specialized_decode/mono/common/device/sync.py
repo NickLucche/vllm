@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from ROCm/ATOM (https://github.com/ROCm/ATOM), MIT License,
 # Copyright (C) 2026, Advanced Micro Devices, Inc.
+# ruff: noqa: E501
 """The tagged mailbox: hand-offs between the CTAs of one GPU (device scope) and
 between GPUs (system scope), every address a named region (`Addr`) recorded
 when the kernel is traced (`vllm.models.mistral.mistral_large4.amd.specialized_decode.mono.common.plan`)."""

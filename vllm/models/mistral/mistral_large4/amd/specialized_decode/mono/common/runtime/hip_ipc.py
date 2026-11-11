@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 FlyDSL Project Contributors
+# ruff: noqa: E501
 
 """Small ctypes wrapper for HIP allocation and IPC memory operations."""
 

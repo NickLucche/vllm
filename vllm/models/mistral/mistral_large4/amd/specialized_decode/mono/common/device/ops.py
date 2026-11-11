@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from ROCm/ATOM (https://github.com/ROCm/ATOM), MIT License,
 # Copyright (C) 2026, Advanced Micro Devices, Inc.
+# ruff: noqa: E501
 """Device-side primitives of the mono kernels: wave reductions and shuffles, the
 approximate hardware math, bf16 / fp8 packing, buffer resources, the
 execution-model constants and the kernel symbol naming.
