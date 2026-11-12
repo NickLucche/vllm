@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 # Copyright (c) 2026 FlyDSL Project Contributors
+# ruff: noqa: E501
 
 """ML4's own geometry, and the widths its kernel is built for.
 

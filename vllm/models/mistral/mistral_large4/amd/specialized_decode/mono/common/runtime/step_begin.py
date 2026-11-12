@@ -3,6 +3,7 @@
 # ruff: noqa: E501
 # Adapted from ROCm/ATOM (https://github.com/ROCm/ATOM), MIT License,
 # Copyright (C) 2026, Advanced Micro Devices, Inc.
+# ruff: noqa: E501
 """A step's beginning (`DESIGN_v3` I1), one launch: every mailbox buffer
 zeroed, then the peer fence -- no rank pushes a step's first pair into a peer's
 buffer before that peer has zeroed it.

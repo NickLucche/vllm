@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: B007, B023, E501, SIM102
 # Copyright (c) 2025 FlyDSL Project Contributors
+# Traced FlyDSL: closures in unrolled loops, long tiled-address expressions.
+# ruff: noqa: B007, B023, E501, SIM102
 
 """ML4 indexed decode MonoKernel: one persistent launch per TP rank.
 

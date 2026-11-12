@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 # Copyright (c) 2026 FlyDSL Project Contributors
+# ruff: noqa: E501
 
 """Torch-side MXFP4 and MXFP8 conversion helpers shared by MoE wrappers."""
 
