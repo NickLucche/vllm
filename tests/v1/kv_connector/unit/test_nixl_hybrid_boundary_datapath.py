@@ -4,9 +4,9 @@
 the Mamba ids P sends is read by the worker into position i of the ids D
 receives into, so:
 
-- P: the boundary id P sends holds P's cached state at exactly
-  `remote_ssm_boundary_tokens` (hash and token count), and the last id is P's
-  running-state slot `row[(n - 1) // bs]`.
+- P: the boundary id P sends holds P's cached state at exactly the boundary
+  both sides derive from the prompt (hash and token count), and the last id is
+  P's running-state slot `row[(n - 1) // bs]`.
 - D: the first received id is D's row slot `boundary // bs - 1` (the slot
   cache_blocks hashes for the boundary), the last is the running-state slot the
   worker reads from (`row[(n - 1) // bs]`, mamba_utils), and the block that
@@ -124,7 +124,10 @@ def test_boundary_state_data_path(xfer, mtp, spec_blocks, prompt_len, boundary):
 
     p_req, params = _run_prefill(prefiller, prompt)
     sent = list(params["remote_block_ids"][MAMBA_GROUP])
-    sent_boundary = params.get("remote_ssm_boundary_tokens")
+    # P prepends its checkpoint to the running state; D infers it by the count.
+    sent_boundary = (
+        p_pool.blocks[sent[0]].block_hash_num_tokens if len(sent) == 2 else None
+    )
     p_row = _row(prefiller, p_req.request_id)
 
     # D: receive, then decode three tokens and finish.
@@ -186,7 +189,6 @@ def test_boundary_state_data_path(xfer, mtp, spec_blocks, prompt_len, boundary):
             # block-aligned prompt locally, above the received boundary.
             assert hit >= boundary
     else:
-        assert sent_boundary is None
         assert len(sent) == 1
 
     # General invariant: a D hit is served by a block cached at exactly the hit

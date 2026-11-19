@@ -609,11 +609,12 @@ class NixlBaseConnectorScheduler:
 
     def _attach_boundary_states(
         self, request: "Request", block_ids: BlockIds
-    ) -> tuple[BlockIds, int | None]:
+    ) -> BlockIds:
         """P side: prepend each align group's retained state checkpoint to the
-        sent block ids. Returns the boundary token count, or None if not sent.
-        The checkpoint is in the request's own table, so the delayed free keeps
-        it alive until D has read it."""
+        sent block ids. D derives its boundary from the prompt and detects it
+        by the block count (see `_sends_ssm_boundary`). The checkpoint is in
+        the request's own table, so the delayed free keeps it alive until D
+        has read it."""
         boundary = self._boundary_reqs.get(request.request_id, 0)
         transfer_index = {
             group_id: i
@@ -631,35 +632,45 @@ class NixlBaseConnectorScheduler:
                 [states[i], *blocks] if i in states else blocks
                 for i, blocks in enumerate(block_ids)
             )
-            return block_ids, boundary
+            return block_ids
         logger.debug(
             "Request %s: no SSM boundary state sent (boundary=%d, groups=%s)",
             request.request_id,
             boundary,
             sorted(states),
         )
-        return block_ids, None
+        return block_ids
 
-    def get_external_state_checkpoint(
-        self, request: "Request", num_computed_tokens: int, num_external_tokens: int
-    ) -> int | None:
-        """D side: the boundary state the prefiller sends along with the load,
-        unless the local prefix hit already covers it."""
-        params = request.kv_transfer_params
-        if (
-            not self._ssm_boundary_transfer
-            or self._kv_cache_manager is None
-            or not params
-            or not params.get("do_remote_prefill")
-        ):
-            return None
-        boundary = params.get("remote_ssm_boundary_tokens")
-        expected = self._kv_cache_manager.get_state_checkpoint_tokens(
-            num_computed_tokens + num_external_tokens
+    def _sends_ssm_boundary(self, params: dict[str, Any]) -> bool:
+        """D side: whether the prefiller prepended its state checkpoint to the
+        sent blocks. It sends one running-state block per align group, and
+        one more in front with the checkpoint."""
+        remote_block_ids = params.get("remote_block_ids") or ()
+        return self._ssm_boundary_transfer and all(
+            g < len(remote_block_ids) and len(remote_block_ids[g]) == 2
+            for g in self._align_ssm_groups
         )
-        if boundary != expected or num_computed_tokens >= boundary:
-            return None
-        return boundary
+
+    def _maybe_reserve_boundary_state(
+        self, request: "Request", num_loaded_tokens: int, num_computed_tokens: int
+    ) -> None:
+        """D side: reserve a slot for the state checkpoint the prefiller sends
+        with the load, unless the local prefix hit already covers it. The
+        prefiller derives its checkpoint from the prompt it computes, which
+        stops short of the backoff just like the load does, so both sides land
+        on the same boundary."""
+        if not self._ssm_boundary_transfer or self._kv_cache_manager is None:
+            return
+        boundary: int | None = None
+        if self._sends_ssm_boundary(request.kv_transfer_params or {}):
+            boundary = self._kv_cache_manager.get_state_checkpoint_tokens(
+                num_loaded_tokens
+            )
+            if not num_computed_tokens < boundary < num_loaded_tokens:
+                boundary = None
+        self._kv_cache_manager.reserve_external_boundary_blocks(
+            request.request_id, boundary
+        )
 
     def has_pending_push_work(self) -> bool:
         return False

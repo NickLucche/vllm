@@ -146,6 +146,26 @@ def _get_speculative_compatibility_factors(
     }
 
 
+def _get_ssm_boundary_compatibility_factors(
+    vllm_config: VllmConfig,
+) -> dict[str, Any] | None:
+    """Return NIXL compatibility factors for SSM boundary-state transfer.
+
+    The prefiller prepends its Mamba checkpoint to the sent blocks without
+    naming its boundary; the decoder derives it from the prompt. Both must
+    enable the transfer and agree on the boundary grid, or the decoder keys
+    the state at the wrong position. An unset `prefix_match_unit` derives
+    from the group block sizes, which the handshake validates; EAGLE/MTP
+    block dropping is covered by the speculative factors.
+    """
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None or not kv_transfer_config.get_from_extra_config(
+        "ssm_boundary_state_xfer", False
+    ):
+        return None
+    return {"prefix_match_unit": vllm_config.cache_config.prefix_match_unit}
+
+
 def compute_nixl_compatibility_hash(
     vllm_config: VllmConfig,
     attn_backend_name: str,
@@ -163,6 +183,8 @@ def compute_nixl_compatibility_hash(
     - Attention backend
     - EAGLE/MTP configuration that affects transferred state
     - Transfer mode (push vs pull)
+    - SSM boundary-state transfer, whose checkpoint both sides derive from
+      the prompt
 
     The transfer mode is included because the push (WRITE) and pull (READ)
     connectors use incompatible transfer protocols; a push connector and a
@@ -203,6 +225,7 @@ def compute_nixl_compatibility_hash(
         "speculative_config": _get_speculative_compatibility_factors(vllm_config),
         # push (WRITE) and pull (READ) connectors are protocol-incompatible
         "transfer_mode": transfer_mode,
+        "ssm_boundary_state_xfer": _get_ssm_boundary_compatibility_factors(vllm_config),
     }
 
     compat_hash = hash_factors(factors)

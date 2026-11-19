@@ -4712,6 +4712,30 @@ def test_transfer_mode_changes_compatibility_hash():
 
 
 @pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "remote_xfer,remote_match_unit,should_match",
+    [(True, None, True), (False, None, False), (True, 64, False)],
+)
+def test_ssm_boundary_xfer_compatibility_hash(
+    remote_xfer: bool, remote_match_unit: int | None, should_match: bool
+):
+    # The decoder derives the boundary of the SSM state the prefiller sends
+    # from the prompt, so both must enable the transfer on the same grid.
+    local_config = create_vllm_config(
+        kv_connector_extra_config={"ssm_boundary_state_xfer": True}
+    )
+    remote_config = create_vllm_config(
+        kv_connector_extra_config={"ssm_boundary_state_xfer": remote_xfer}
+    )
+    remote_config.cache_config.prefix_match_unit = remote_match_unit
+
+    local_hash = compute_nixl_compatibility_hash(local_config, "FLASH_ATTN")
+    remote_hash = compute_nixl_compatibility_hash(remote_config, "FLASH_ATTN")
+
+    assert (local_hash == remote_hash) is should_match
+
+
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("mode", ["pull", "push"])
 @pytest.mark.parametrize(
     "tp_size,pcp_size,dcp_size,transfer_tp_size",

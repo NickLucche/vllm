@@ -64,6 +64,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             actual = self._get_remote_prefill_token_count(len(token_ids))
             count = actual - num_computed_tokens
             if count > 0:
+                self._maybe_reserve_boundary_state(request, actual, num_computed_tokens)
                 return count, True
 
         if (
@@ -155,8 +156,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     )
                     local_block_ids = self.get_exchange_clipped_blocks(
                         unhashed_local_block_ids,
-                        keep_ssm_boundary=self._ssm_boundary_transfer
-                        and "remote_ssm_boundary_tokens" in params,
+                        keep_ssm_boundary=self._sends_ssm_boundary(params),
                     )
                     # Blocks covered by the local prefix cache, per KV cache group.
                     # Each count fixes where that group's DCP slice starts, which the
@@ -234,6 +234,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # worker side will notify and free blocks in the prefill instance.
             self._reqs_need_recv[request.request_id] = (request, [], (), False)
             params["do_remote_prefill"] = False
+            if self._ssm_boundary_transfer and self._kv_cache_manager is not None:
+                self._kv_cache_manager.reserve_external_boundary_blocks(
+                    request.request_id, None
+                )
             return False, None
 
         if is_d_node and not self.is_bidirectional_kv_xfer_enabled:
@@ -256,7 +260,6 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         delay_free_blocks = any(len(group) > 0 for group in block_ids)
         remote_num_tokens = 0
         blocks_expiry_time = None
-        ssm_boundary_tokens = None
         if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
             request_kv_blocks_ttl = self._kv_lease_duration
@@ -282,9 +285,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # Here we "unpad" blocks to send the actual remote blocks to be read.
             block_ids = self.get_exchange_clipped_blocks(block_ids)
             if is_p_node and self._ssm_boundary_transfer:
-                block_ids, ssm_boundary_tokens = self._attach_boundary_states(
-                    request, block_ids
-                )
+                block_ids = self._attach_boundary_states(request, block_ids)
 
             remote_num_tokens = request.num_computed_tokens
         else:
@@ -306,6 +307,4 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             remote_registration_generation=self._registration_generation,
             transfer_mode=self._TRANSFER_MODE,
         )
-        if ssm_boundary_tokens is not None:
-            params_out["remote_ssm_boundary_tokens"] = ssm_boundary_tokens
         return delay_free_blocks, params_out

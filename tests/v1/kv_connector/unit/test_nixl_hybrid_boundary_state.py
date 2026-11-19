@@ -170,6 +170,15 @@ def _turn1_prompt(num_tokens: int) -> list[int]:
     return [7 + i for i in range(num_tokens)]
 
 
+def _sent_boundary(prefiller, params) -> int | None:
+    """Tokens covered by the state checkpoint P prepended to the running state,
+    if it sent one. D infers it from the prompt and the block count."""
+    sent = params["remote_block_ids"][MAMBA_GROUP]
+    if len(sent) != 2:
+        return None
+    return prefiller.kv_cache_manager.block_pool.blocks[sent[0]].block_hash_num_tokens
+
+
 def test_decode_pod_hits_prompt_boundary_after_nixl_receive():
     """58-token prompt, block 16: P computes 57 tokens and also sends its state
     at 48, so the decode pod resumes the next turn from 48."""
@@ -178,8 +187,7 @@ def test_decode_pod_hits_prompt_boundary_after_nixl_receive():
     prompt = _turn1_prompt(58)
 
     _, params = _run_prefill(prefiller, prompt)
-    assert params["remote_ssm_boundary_tokens"] == 48
-    assert len(params["remote_block_ids"][MAMBA_GROUP]) == 2
+    assert _sent_boundary(prefiller, params) == 48
 
     local_ssm_block_ids, output_tokens = _run_decode(
         decoder, prompt, params, num_output=3
@@ -192,8 +200,9 @@ def test_decode_pod_hits_prompt_boundary_after_nixl_receive():
     "p_xfer,d_xfer", [(False, False), (False, True), (True, False)]
 )
 def test_boundary_state_needs_flag_on_both_sides(p_xfer, d_xfer):
-    """Off by default; with the flag on only one side, the decode pod receives
-    only the running state as today and caches no boundary state."""
+    """Off by default. A mismatch fails the NIXL compatibility hash; if it
+    still reached here, the decode pod receives only the running state as today
+    and caches no boundary state."""
     prefiller = _make_scheduler("kv_producer", ssm_boundary_state_xfer=p_xfer)
     decoder = _make_scheduler("kv_consumer", ssm_boundary_state_xfer=d_xfer)
     prompt = _turn1_prompt(58)
@@ -214,7 +223,6 @@ def test_prompt_ending_on_boundary_sends_running_state_only():
     prompt = _turn1_prompt(49)
 
     _, params = _run_prefill(prefiller, prompt)
-    assert "remote_ssm_boundary_tokens" not in params
     assert len(params["remote_block_ids"][MAMBA_GROUP]) == 1
 
     _, output_tokens = _run_decode(decoder, prompt, params, num_output=2)
@@ -307,8 +315,7 @@ def test_mtp_sends_and_caches_replay_boundary_state(prompt_len, boundary):
     prompt = _turn1_prompt(prompt_len)
 
     _, params = _run_prefill(prefiller, prompt)
-    assert params.get("remote_ssm_boundary_tokens") == boundary
-    assert len(params["remote_block_ids"][MAMBA_GROUP]) == 2
+    assert _sent_boundary(prefiller, params) == boundary
 
     local_ssm_block_ids, output_tokens = _run_decode(
         decoder, prompt, params, num_output=3
@@ -337,7 +344,7 @@ def test_mtp_every_mamba_group_sends_and_caches_its_boundary_state():
     prompt = _turn1_prompt(58)
 
     _, params = _run_prefill(prefiller, prompt)
-    assert params.get("remote_ssm_boundary_tokens") == 32
+    assert _sent_boundary(prefiller, params) == 32
     assert [len(g) for g in params["remote_block_ids"][MAMBA_GROUP:]] == [2, 2, 2]
 
     _, output_tokens = _run_decode(decoder, prompt, params, num_output=3)
@@ -347,7 +354,7 @@ def test_mtp_every_mamba_group_sends_and_caches_its_boundary_state():
 def test_mtp_prefiller_holds_boundary_state_until_sent():
     prefiller = _make_scheduler("kv_producer", mtp=True)
     request, params = _run_prefill(prefiller, _turn1_prompt(58))
-    assert params.get("remote_ssm_boundary_tokens") == 32
+    assert _sent_boundary(prefiller, params) == 32
     boundary = prefiller.kv_cache_manager.block_pool.blocks[
         params["remote_block_ids"][MAMBA_GROUP][0]
     ]
@@ -375,6 +382,6 @@ def test_mtp_without_block_drop_keeps_last_prompt_boundary(prompt_len, boundary)
 
     prompt = _turn1_prompt(prompt_len)
     _, params = _run_prefill(prefiller, prompt)
-    assert params.get("remote_ssm_boundary_tokens") == boundary
+    assert _sent_boundary(prefiller, params) == boundary
     _, output_tokens = _run_decode(decoder, prompt, params, num_output=2)
     assert _decode_pod_hit(decoder, prompt, output_tokens) == 48
