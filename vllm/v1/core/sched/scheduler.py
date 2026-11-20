@@ -1722,9 +1722,9 @@ class Scheduler(SchedulerInterface):
                 self.async_kv_waiting.prepend_requests(step_skipped_async_kv)
             if kv_blocked_request is not None and not self.running:
                 # Nothing running will free KV blocks, and streaming sessions
-                # outside `running` cannot be preempted: free one so the
+                # outside `running` cannot be preempted: free enough so the
                 # blocked request can be scheduled in a later step.
-                self._evict_idle_session(kv_blocked_request, scheduled_timestamp)
+                self._evict_idle_sessions(kv_blocked_request, scheduled_timestamp)
 
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
@@ -1912,13 +1912,23 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
+        self._release_request_state(request, timestamp, drop_stale_output)
+        request.status = RequestStatus.PREEMPTED
+        # Put the request back to the waiting queue.
+        self.waiting.prepend_request(request)
+
+    def _release_request_state(
+        self, request: Request, timestamp: float, drop_stale_output: bool = False
+    ) -> None:
+        """Free a request's KV cache and worker state so it recomputes from
+        scratch on its next admission. The caller sets its status and queue.
+        """
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
         self._free_request_blocks(request)
         self.encoder_cache_manager.free(request)
         self._pending_encoder_input_ids.pop(request.request_id, None)
         self._inflight_prefills.discard(request)
-        request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
@@ -1939,19 +1949,15 @@ class Scheduler(SchedulerInterface):
         if self.log_stats:
             self._num_preempted_reqs += 1
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
-
-        # Put the request back to the waiting queue.
-        self.waiting.prepend_request(request)
         self.reset_preempted_req_ids.add(request.request_id)
 
-    def _evict_idle_session(self, blocked: Request, timestamp: float) -> bool:
-        """Free the KV cache of a streaming session that holds blocks outside
-        `running`, preferring the longest-parked one.
+    def _evict_idle_sessions(self, blocked: Request, timestamp: float) -> None:
+        """Free the KV cache of streaming sessions that hold blocks outside
+        `running`, longest-parked first, until `blocked` would fit.
 
         Without this, sessions parked between chunks, or waiting with KV for
         blocks that only other such sessions hold, can wedge the scheduler.
-        The session keeps its status and recomputes on its next admission.
-        Returns False if no session can be evicted.
+        Evicted sessions keep their status and recompute on next admission.
         """
         candidates = [
             request
@@ -1963,29 +1969,36 @@ class Scheduler(SchedulerInterface):
             and request.num_computed_tokens > 0
             and not request.num_in_flight_tokens
         ]
-        if not candidates:
-            return False
-        parked = [
-            request
-            for request in candidates
-            if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-        ]
-        victim = parked[0] if parked else candidates[-1]
+        # Parked sessions first: they need nothing until their next chunk.
+        candidates.sort(
+            key=lambda r: r.status != RequestStatus.WAITING_FOR_STREAMING_REQ
+        )
 
-        self.kv_holding_waiting.remove_request(victim)
-        self._free_request_blocks(victim)
-        self.encoder_cache_manager.free(victim)
-        self._pending_encoder_input_ids.pop(victim.request_id, None)
-        victim.num_computed_tokens = 0
-        victim.num_preemptions += 1
-        if self.log_stats:
-            self._num_preempted_reqs += 1
-            victim.record_event(EngineCoreEventType.PREEMPTED, timestamp)
-        # Drop the worker state. A parked session still counts toward
-        # num_waiting_for_streaming_input until its next chunk arrives.
-        self.reset_preempted_req_ids.add(victim.request_id)
-        self._enqueue_waiting_request(victim)
-        return True
+        kv_cache_manager = self.kv_cache_manager
+        num_tokens = min(blocked.num_tokens, self.max_model_len)
+        # Upper bound on what `blocked` needs: ignores prefix cache hits.
+        num_blocks_needed = kv_cache_manager.coordinator.get_num_blocks_to_allocate(
+            request_id=blocked.request_id,
+            num_tokens=num_tokens,
+            new_computed_blocks=kv_cache_manager.empty_kv_cache_blocks.blocks,
+            num_encoder_tokens=0,
+            total_computed_tokens=blocked.num_computed_tokens,
+            num_local_computed_tokens=blocked.num_computed_tokens,
+            num_tokens_main_model=num_tokens,
+        )
+        # Count released blocks ourselves: frees may be deferred.
+        num_blocks_freed = kv_cache_manager.block_pool.get_num_free_blocks()
+        for victim in candidates:
+            if num_blocks_freed >= num_blocks_needed:
+                break
+            num_blocks_freed += sum(
+                map(len, kv_cache_manager.get_block_ids(victim.request_id))
+            )
+            self.kv_holding_waiting.remove_request(victim)
+            self._release_request_state(victim, timestamp)
+            # A parked session still counts toward
+            # num_waiting_for_streaming_input until its next chunk arrives.
+            self._enqueue_waiting_request(victim)
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
