@@ -1054,6 +1054,8 @@ class Scheduler(SchedulerInterface):
 
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
+            # Set if a waiting request could not get KV blocks.
+            kv_blocked_request: Request | None = None
             step_skipped_async_kv: deque[Request] = deque()
             # Async loads started this step: newer than any block-holder.
             step_started_kv_loads: list[Request] = []
@@ -1567,6 +1569,7 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
+                    kv_blocked_request = request
                     break
 
                 # KVTransfer: the connector uses this info to determine
@@ -1717,6 +1720,11 @@ class Scheduler(SchedulerInterface):
                 self.waiting.prepend_requests(step_skipped_waiting)
             if step_skipped_async_kv:
                 self.async_kv_waiting.prepend_requests(step_skipped_async_kv)
+            if kv_blocked_request is not None and not self.running:
+                # Nothing running will free KV blocks, and streaming sessions
+                # outside `running` cannot be preempted: free one so the
+                # blocked request can be scheduled in a later step.
+                self._evict_idle_session(kv_blocked_request, scheduled_timestamp)
 
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
@@ -1935,6 +1943,49 @@ class Scheduler(SchedulerInterface):
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
         self.reset_preempted_req_ids.add(request.request_id)
+
+    def _evict_idle_session(self, blocked: Request, timestamp: float) -> bool:
+        """Free the KV cache of a streaming session that holds blocks outside
+        `running`, preferring the longest-parked one.
+
+        Without this, sessions parked between chunks, or waiting with KV for
+        blocks that only other such sessions hold, can wedge the scheduler.
+        The session keeps its status and recomputes on its next admission.
+        Returns False if no session can be evicted.
+        """
+        candidates = [
+            request
+            for request in self.kv_holding_waiting
+            if request is not blocked
+            and request.resumable
+            and request.status
+            in (RequestStatus.WAITING_FOR_STREAMING_REQ, RequestStatus.WAITING)
+            and request.num_computed_tokens > 0
+            and not request.num_in_flight_tokens
+        ]
+        if not candidates:
+            return False
+        parked = [
+            request
+            for request in candidates
+            if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+        ]
+        victim = parked[0] if parked else candidates[-1]
+
+        self.kv_holding_waiting.remove_request(victim)
+        self._free_request_blocks(victim)
+        self.encoder_cache_manager.free(victim)
+        self._pending_encoder_input_ids.pop(victim.request_id, None)
+        victim.num_computed_tokens = 0
+        victim.num_preemptions += 1
+        if self.log_stats:
+            self._num_preempted_reqs += 1
+            victim.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+        # Drop the worker state. A parked session still counts toward
+        # num_waiting_for_streaming_input until its next chunk arrives.
+        self.reset_preempted_req_ids.add(victim.request_id)
+        self._enqueue_waiting_request(victim)
+        return True
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
